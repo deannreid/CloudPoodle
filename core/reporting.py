@@ -112,7 +112,7 @@ body{font:15px/1.5 "Segoe UI",Roboto,Arial,system-ui;background:var(--bg);color:
   background:#ffffff26; border:1px solid rgba(255,255,255,.18); padding:3px; }
 .brand .name{font-weight:700; color:#fff; letter-spacing:.2px; font-size:.9rem}
 
-.container{width:95%;max-width:1200px;margin:24px auto;background:var(--card);
+.container{width:95%;max-width:1900px;margin:24px auto;background:var(--card);
 border:1px solid var(--border);border-radius:12px;padding:22px 26px;box-shadow:0 10px 30px rgba(0,0,0,.20)}
 h3{color:var(--accent);border-bottom:2px solid color-mix(in srgb,var(--accent) 60%, transparent);
 padding-bottom:6px;margin:16px 0 8px 0;font-weight:700;letter-spacing:.2px}
