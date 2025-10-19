@@ -44,6 +44,49 @@ def _pretty_section_name(key: str, section_titles: Dict[str, str] | None = None)
     k = _split_camel(k.replace("_", " "))
     return k.title() or key.title()
 
+def _json_parse_maybe(val: Any):
+    """Return (is_json, parsed_obj). Accept dict/list directly, or JSON string."""
+    if isinstance(val, (dict, list)):
+        return True, val
+    if isinstance(val, str):
+        s = val.strip()
+        if s.startswith("{") or s.startswith("["):
+            try:
+                return True, json.loads(s)
+            except Exception:
+                return False, None
+    return False, None
+
+def _json_summary(parsed: Any, limit: int = 180) -> str:
+    """Compact one-line summary of JSON for the <summary> text."""
+    try:
+        compact = json.dumps(parsed, ensure_ascii=False, separators=(",", ":"))
+        return (compact[:limit] + " … +" + str(len(compact) - limit) + " chars") if len(compact) > limit else compact
+    except Exception:
+        return str(parsed)
+
+def _cell_html(val: Any) -> str:
+    """
+    Render a table cell:
+      - JSON/dict/list -> <details class='cp-json'><summary>…</summary><pre>pretty</pre></details>
+      - otherwise      -> escaped text
+    """
+    is_json, parsed = _json_parse_maybe(val)
+    if is_json:
+        summ = _json_summary(parsed)
+        try:
+            pretty = json.dumps(parsed, ensure_ascii=False, indent=2)
+        except Exception:
+            pretty = str(parsed)
+        return (
+            f"<details class='cp-json'>"
+            f"<summary>{_esc(summ)}</summary>"
+            f"<pre>{_esc(pretty)}</pre>"
+            f"</details>"
+        )
+    # non-JSON path
+    return _esc("" if val is None else _fmt_cell(val))
+
 # ----- bucket helpers (for colored pills) -----
 
 def _bucket_class(bucket: str) -> str:
@@ -208,6 +251,28 @@ padding:8px 12px;border-radius:999px;cursor:pointer;font-weight:600;font-size:.9
 color:#fff;border-color:transparent;box-shadow:0 4px 14px rgba(0,0,0,.20)}
 .tabpanel{display:none}
 .tabpanel.active{display:block}
+
+/* JSON pretty dropdown */
+.cp-json{ display:block }
+.cp-json > summary{
+  cursor:pointer; list-style:none; outline:none;
+  padding:6px 10px; border:1px solid var(--border); border-radius:8px;
+  background: color-mix(in srgb, var(--card) 96%, #000 4%);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  font-size:.9rem; line-height:1.4; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+}
+.cp-json > summary::-webkit-details-marker{ display:none }
+.cp-json[open] > summary{ border-bottom-left-radius:0; border-bottom-right-radius:0 }
+.cp-json pre{
+  margin:0; padding:12px 14px; border:1px solid var(--border); border-top:none;
+  border-bottom-left-radius:8px; border-bottom-right-radius:8px;
+  background: color-mix(in srgb, var(--card) 94%, #000 6%);
+  max-height:360px; overflow:auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  font-size:.9rem; line-height:1.4;
+}
+
+
 """
 
 def _theme_css(provider: str | None) -> str:
@@ -277,6 +342,15 @@ def _render_table(rows: List[Dict[str, Any]], title: str) -> str:
             else:
                 tds.append(f"<td>{_esc(_fmt_cell(raw))}</td>")
         body.append("<tr>" + "".join(tds) + "</tr>")
+    
+    body_rows = []
+    for r in rows:
+        tds = []
+        for c in cols:
+            raw = r.get(c, "")
+            # Render with JSON-friendly dropdown when applicable
+            tds.append(f"<td>{_cell_html(raw)}</td>")
+        body_rows.append("<tr>" + "".join(tds) + "</tr>")
 
     return f"""
     <div class="card">
@@ -284,10 +358,11 @@ def _render_table(rows: List[Dict[str, Any]], title: str) -> str:
       <div class="tablewrap">
         <table id="tbl-{_slug(title)}">
           <thead>{thead}</thead>
-          <tbody>{''.join(body)}</tbody>
+          <tbody>{''.join(body_rows)}</tbody>
         </table>
       </div>
-    </div>"""
+    </div>
+    """
 
 def _render_sections_html(sections: List[Dict[str, str]]) -> str:
     out = []
