@@ -1,12 +1,12 @@
 # ================================================================
-# File     : tenant_overview.py
+# File     : modules/tenant_overview.py
 # Purpose  : Retrieve and summarise core Entra tenant information
 # Notes    : Read-only Graph. Robust to schema differences. KV tables
-#            in console; compact branding; safe fallbacks on 400s.
+#            in console & HTML; module-scoped CSS/JS for light UX.
 # ================================================================
 
 from datetime import datetime, timezone
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Tuple
 
 from core.utils import (
     fncPrintMessage,
@@ -16,10 +16,72 @@ from core.utils import (
     fncNewRunId,
 )
 from core.reporting import fncWriteHTMLReport
-from handlers.graph.graph_helpers import safe_select_get_all  # still used for org
+from handlers.graph.graph_helpers import safe_select_get_all  # used for org
 
 REQUIRED_PERMS = ["Directory.Read.All"]  # extras: Policy.Read.All, Reports.Read.All
 
+# ------------------------- module-scoped CSS/JS -------------------------
+
+TENANT_OVERVIEW_CSS = r"""
+/* Scope to this module only */
+.tenant-overview .card table{ table-layout:auto }
+
+/* Toolbars */
+.tenant-overview .to-toolbar{
+  display:flex; gap:10px; align-items:center; margin:6px 2px 0 2px; flex-wrap:wrap;
+}
+.tenant-overview .to-toolbar input[type="search"]{
+  padding:6px 10px; border-radius:999px; border:1px solid var(--border);
+  background:var(--card); color:var(--text); min-width:220px; outline:none;
+}
+.tenant-overview .to-toolbar .btn{
+  padding:6px 10px; border:1px solid var(--border); border-radius:999px;
+  background:var(--card); cursor:pointer; font-weight:600;
+}
+.tenant-overview .to-toolbar .btn.active{
+  background:linear-gradient(90deg,var(--accent2),var(--accent));
+  color:#fff; border-color:transparent;
+}
+
+/* Compact KV look */
+.tenant-overview table.summary td{ font-weight:600 }
+
+/* Sticky headers for long lists */
+.tenant-overview table thead th{ position:sticky; top:0; z-index:2 }
+"""
+
+TENANT_OVERVIEW_JS = r"""
+(function(){
+  const root = document.querySelector('.tenant-overview') || document;
+
+  function enhanceSearchable(title){
+    const slug = title.toLowerCase().replace(/[^a-z0-9]+/g,'-');
+    const card = root.querySelector('#tbl-'+slug)?.closest('.card');
+    const tbl  = root.querySelector('#tbl-'+slug);
+    if(!card || !tbl) return;
+
+    const bar = document.createElement('div');
+    bar.className = 'to-toolbar';
+    bar.innerHTML = `
+      <input type="search" placeholder="Search ${title}…" aria-label="Search ${title}">
+    `;
+    card.insertBefore(bar, card.querySelector('.tablewrap'));
+    const search = bar.querySelector('input[type="search"]');
+
+    function apply(){
+      const q = (search.value||'').toLowerCase();
+      Array.from(tbl.querySelectorAll('tbody tr')).forEach(tr=>{
+        const txt = tr.textContent.toLowerCase();
+        tr.style.display = (!q || txt.includes(q)) ? '' : 'none';
+      });
+    }
+    search.addEventListener('input', apply);
+  }
+
+  enhanceSearchable('Domains');
+  enhanceSearchable('Licenses');
+})();
+"""
 
 # ------------------------- helpers -------------------------
 
@@ -41,14 +103,10 @@ def _get_domains_relaxed(client) -> List[Dict[str, Any]]:
     """
     full = ["id", "isVerified", "isDefault", "isRootDomain", "authenticationType"]
     try:
-        # try the full set (fast path)
         items = client.get_all(f"domains?$select={','.join(full)}")
         return items
-    except Exception as ex:
-        fncPrintMessage(
-            "Domain property not supported by this API/tenant — "
-            "retrying without 'isRootDomain'.", "warn"
-        )
+    except Exception:
+        fncPrintMessage("Domain property not supported by this API/tenant... retrying without 'isRootDomain'.", "warn")
         minimal = [f for f in full if f != "isRootDomain"]
         try:
             items = client.get_all(f"domains?$select={','.join(minimal)}")
@@ -65,15 +123,14 @@ def _get_domains_relaxed(client) -> List[Dict[str, Any]]:
             it.setdefault("isRootDomain", "Not Found")
         return items
 
-
-# --------------------------- run ----------------------------
+# ------------------------- main -------------------------
 
 def run(client, args):
     run_id = fncNewRunId("tenant")
     ts = datetime.now(timezone.utc).isoformat()
     fncPrintMessage(f"Running Tenant Overview (run={run_id})", "info")
 
-    # ---------- Organization (safe select) ----------
+    # ---------- Organization ----------
     org_fields = [
         "id", "displayName", "verifiedDomains", "onPremisesSyncEnabled",
         "createdDateTime", "privacyProfile", "countryLetterCode",
@@ -89,17 +146,17 @@ def run(client, args):
         fncPrintMessage(f"Failed to fetch organisation: {ex}", "error")
         return {"error": str(ex)}
 
-    # ---------- Domains (relaxed) ----------
+    # ---------- Domains ----------
     try:
         domains = _get_domains_relaxed(client)
     except Exception as ex:
         fncPrintMessage(f"Failed to fetch domains: {ex}", "error")
         domains = []
 
-    verified_count = sum(1 for d in domains if str(d.get("isVerified")) == "True")
-    federated_count = sum(1 for d in domains if str(d.get("authenticationType")).lower() == "federated")
+    verified_count   = sum(1 for d in domains if str(d.get("isVerified")) == "True")
+    federated_count  = sum(1 for d in domains if str(d.get("authenticationType")).lower() == "federated")
 
-    # ---------- Branding (singleton) ----------
+    # ---------- Branding ----------
     branding = []
     branding_kv = []
     org_id = org.get("id")
@@ -126,13 +183,13 @@ def run(client, args):
 
     branding_configured = bool(branding and any(v for k, v in branding[0].items() if k not in ("cdnList",)))
 
-    # ---------- Security Defaults (best-effort, tolerant) ----------
+    # ---------- Security Defaults (best-effort) ----------
     sec_defaults_enabled = "Unknown"
     try:
         sd = client.get("policies/identitySecurityDefaults") or {}
         if isinstance(sd, dict) and "isEnabled" in sd:
             sec_defaults_enabled = sd.get("isEnabled", "Unknown")
-    except Exception as ex:
+    except Exception:
         fncPrintMessage("Security Defaults policy not accessible (Policy.Read.All or endpoint not available).", "warn")
 
     # ---------- Authorization Policy (best-effort) ----------
@@ -148,7 +205,7 @@ def run(client, args):
             "canAddGuests": durp.get("allowedToInviteGuests", "Unknown"),
             "canReadBitlockerKeys": durp.get("allowedToReadBitlockerKeysForOwnedDevice", "Unknown"),
         }
-    except Exception as ex:
+    except Exception:
         fncPrintMessage("Authorization policy not accessible.", "warn")
 
     # ---------- Licensing ----------
@@ -213,6 +270,9 @@ def run(client, args):
             fncPrintMessage(f"Showing first 20 of {len(lic_rows)} SKUs (export for full list).", "warn")
 
     # ---------- Export payload ----------
+    # Convert policy dicts to KV lists so reporting renders them as tables.
+    authorization_policy_kv = _kv_rows(authz_policy) if isinstance(authz_policy, dict) else []
+    default_user_role_kv    = _kv_rows(default_user_role_summary) if isinstance(default_user_role_summary, dict) else []
     export_data = {
         "run_id": run_id,
         "timestamp": ts,
@@ -220,9 +280,12 @@ def run(client, args):
         "summary": summary,
         "domains": domains,
         "brandingKV": branding_kv,
-        "authorizationPolicy": authz_policy,
-        "defaultUserRole": default_user_role_summary,
+        "authorizationPolicyKV": authorization_policy_kv,
+        "defaultUserRoleKV": default_user_role_kv,
         "licenses": lic_rows,
+        "_container_class": "tenant-overview",
+        "_inline_css": TENANT_OVERVIEW_CSS,
+        "_inline_js":  TENANT_OVERVIEW_JS,
     }
 
     # Legacy per-module export support (kept just in case)
