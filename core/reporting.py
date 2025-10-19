@@ -29,6 +29,54 @@ def _fmt_cell(val: Any) -> str:
             return str(val)
     return "" if val is None else str(val)
 
+def _split_camel(name: str) -> str:
+    s = re.sub(r"(?<!^)(?=[A-Z])", " ", str(name))
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+def _pretty_section_name(key: str, section_titles: Dict[str, str] | None = None) -> str:
+    section_titles = section_titles or {}
+    if key in section_titles:
+        return section_titles[key]
+    k = key
+    if k.lower().endswith("kv"):
+        k = k[:-2]
+    k = _split_camel(k.replace("_", " "))
+    return k.title() or key.title()
+
+# ----- bucket helpers (for colored pills) -----
+
+def _bucket_class(bucket: str) -> str:
+    """Map a bucket label to a CSS class."""
+    b = (bucket or "").strip().lower()
+    if b == "expired":
+        return "expired"
+    if b in ("critical", "crit"):
+        return "crit"
+    if b in ("warning", "warn"):
+        return "warn"
+    if b in ("≤60d", "<=60d", "≤60", "<=60", "≤90d", "<=90d", "≤90", "<=90"):
+        return "soon"
+    if b in (">90d", "ok"):
+        return "ok"
+    return "unknown"
+
+def _bucket_from_days(days: Any) -> str:
+    try:
+        d = int(days)
+    except Exception:
+        return "unknown"
+    if d < 0:
+        return "expired"
+    if d <= 10:
+        return "critical"
+    if d <= 30:
+        return "warning"
+    if d <= 90:
+        return "≤60d" if d <= 60 else "≤90d"
+    return ">90d"
+
+
 # ---------- safe theme defaults (logos optional) ----------
 
 try:
@@ -100,6 +148,8 @@ body{font:15px/1.5 "Segoe UI",Roboto,Arial,system-ui;background:var(--bg);color:
 .header h1{margin:0;font-weight:800;letter-spacing:.3px;font-size:1.9rem}
 .header h2{margin:4px 0 2px 0;font-weight:500;opacity:.95}
 .header p{margin:4px 0 0 0;opacity:.85;font-size:.9rem}
+.header .sub{margin:0;color:#f0f4ff;opacity:.9}
+
 .header .brand{
   position:absolute; right:20px; top:14px; display:flex; gap:8px; align-items:center;
   background:rgba(0,0,0,.10); padding:6px 10px; border-radius:999px;
@@ -136,20 +186,28 @@ table.summary td{background:color-mix(in srgb,var(--card) 95%, #000 5%);color:va
 .footer{width:95%;max-width:1200px;margin:26px auto 12px auto;color:var(--muted);
 text-align:center;font-size:.9rem}
 
-/* tabs */
+.pill{display:inline-flex;align-items:center;justify-content:center;
+padding:2px 10px;border-radius:9999px;font-weight:700;border:1px solid var(--border);
+white-space:nowrap;line-height:1;font-variant-numeric:tabular-nums}
+.pill.xs{padding:1px 6px;font-size:.8rem}
+.pill.ok{ background:#10b98126; border:none; color:#10b981 }
+.pill.warn{ background:#f59e0b26; border:none; color:#f59e0b }
+.pill.crit{ background:#ef444426; border:none; color:#ef4444 }
+.pill.expired{ background:#6b728026; border:none; color:#9ca3af }
+.pill.soon{ background:#60a5fa26; border:none; color:#60a5fa }
+.pill.unknown{ background:#64748b26; border:none; color:#94a3b8 }
+
+td.col-days, th.col-days{ text-align:center; width:90px }
+td.col-buck, th.col-buck{ text-align:center; width:110px }
+
 .tabs{width:95%;max-width:1200px;margin:24px auto 0 auto}
 .tabbar{display:flex;flex-wrap:wrap;gap:8px;padding:0 4px}
 .tabbar button{background:var(--card);color:var(--text);border:1px solid var(--border);
 padding:8px 12px;border-radius:999px;cursor:pointer;font-weight:600;font-size:.9rem}
 .tabbar button.active{background:linear-gradient(90deg,var(--accent2),var(--accent));
 color:#fff;border-color:transparent;box-shadow:0 4px 14px rgba(0,0,0,.20)}
-.tabpanel{display:none}.tabpanel.active{display:block}
-
-/* pills (optional) */
-.pill{display:inline-flex;align-items:center;justify-content:center;
-padding:2px 10px;border-radius:9999px;font-weight:700;border:1px solid var(--border);
-white-space:nowrap;line-height:1;font-variant-numeric:tabular-nums}
-.pill.xs{padding:1px 6px;font-size:.8rem}
+.tabpanel{display:none}
+.tabpanel.active{display:block}
 """
 
 def _theme_css(provider: str | None) -> str:
@@ -173,13 +231,15 @@ def _brand_badge_html(provider: str | None) -> str:
         )
     return f'<div class="brand" title="{_esc(t["name"])}"><span class="logo">🐩</span><span class="name">{label}</span></div>'
 
-def _header_html(subtitle: str, provider: str | None) -> str:
+def _header_html(title: str, provider: str | None, subtitle_small: str | None = None) -> str:
     ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    sub_small = f'<p class="sub">{_esc(subtitle_small)}</p>' if subtitle_small else ""
     return f"""
   <div class="header">
     <h1>🐩 CloudPoodle Report</h1>
     {_brand_badge_html(provider)}
-    <h2>{_esc(subtitle)}</h2>
+    <h2>{_esc(title)}</h2>
+    {sub_small}
     <p>Generated on {_esc(ts)}</p>
   </div>
 """
@@ -190,10 +250,34 @@ def _render_table(rows: List[Dict[str, Any]], title: str) -> str:
     if not rows:
         return f"<div class='card'><h4>{_esc(title)}</h4><p>No data.</p></div>"
     cols = list(rows[0].keys())
-    thead = "<tr>" + "".join(f"<th>{_esc(c)}</th>" for c in cols) + "</tr>"
+
+    # header with special classes for days/bucket
+    head_cells = []
+    for c in cols:
+        if c == "daysRemaining":
+            head_cells.append("<th class='col-days'>daysRemaining</th>")
+        elif c == "bucket":
+            head_cells.append("<th class='col-buck'>bucket</th>")
+        else:
+            head_cells.append(f"<th>{_esc(c)}</th>")
+    thead = "<tr>" + "".join(head_cells) + "</tr>"
+
     body = []
     for r in rows:
-        body.append("<tr>" + "".join(f"<td>{_esc(_fmt_cell(r.get(c,'')))}</td>" for c in cols) + "</tr>")
+        tds = []
+        row_bucket = r.get("bucket")
+        for c in cols:
+            raw = r.get(c, "")
+            if c == "bucket":
+                cls = _bucket_class(str(raw))
+                tds.append(f"<td class='col-buck'><span class='pill xs {cls}'>{_esc(raw)}</span></td>")
+            elif c == "daysRemaining":
+                cls = _bucket_class(row_bucket) if row_bucket else _bucket_class(_bucket_from_days(raw))
+                tds.append(f"<td class='col-days'><span class='pill xs {cls}'>{_esc(raw)}</span></td>")
+            else:
+                tds.append(f"<td>{_esc(_fmt_cell(raw))}</td>")
+        body.append("<tr>" + "".join(tds) + "</tr>")
+
     return f"""
     <div class="card">
       <h4>{_esc(title)}</h4>
@@ -225,13 +309,15 @@ def _details_html(data_dict: Dict[str, Any]) -> str:
     if isinstance(data_dict.get("sections_html"), list):
         parts.append(_render_sections_html(data_dict["sections_html"]))
 
+    section_titles = data_dict.get("_section_titles") or {}
+
     # Auto-render list[dict] tables for other keys
     for k, v in data_dict.items():
         if k in {"summary", "sections_html", "_inline_css", "_inline_js", "_styles", "_scripts",
-                 "_container_class", "_expose"}:
+                 "_container_class", "_expose", "_title", "_subtitle", "_section_titles"}:
             continue
         if isinstance(v, list) and v and isinstance(v[0], dict):
-            parts.append(_render_table(v, k.title()))
+            parts.append(_render_table(v, _pretty_section_name(k, section_titles)))
     return "\n".join(parts)
 
 # ---------- asset collectors (module can inject CSS/JS) ----------
@@ -271,7 +357,6 @@ def _collect_module_assets(provider: str | None, data: Dict[str, Any]) -> tuple[
         try:
             expose_script = f"<script>window._cp = {json.dumps(exposed, ensure_ascii=False)};</script>"
         except Exception:
-            # Fail soft if the object isn't serializable
             expose_script = "<script>window._cp = {};</script>"
 
     container = data.get("_container_class") or ""
@@ -285,7 +370,12 @@ def fncWriteHTMLReport(filename: str, module_name: str, data_dict: Dict[str, Any
     provider = (data_dict or {}).get("provider", "entra")
 
     css, js, container_class, expose_snippet = _collect_module_assets(provider, data_dict)
-    header  = _header_html(f"Module: {module_name}", provider)
+
+    # Allow modules to set the header lines
+    page_h2      = data_dict.get("_title") or f"Module: {module_name}"
+    page_subline = data_dict.get("_subtitle")
+
+    header  = _header_html(page_h2, provider, page_subline)
     summary = _summary_html(data_dict.get("summary", {}))
     details = _details_html(data_dict)
 
@@ -329,9 +419,14 @@ def fncWriteHTMLReportMulti(filename: str, modules: Dict[str, Dict[str, Any]]) -
                 provider = v["provider"]; break
 
     base_css = _base_css() + _theme_css(provider)
-    header = _header_html("Multi-module report", provider)
 
-    # Build tabs + panels; each panel gets its own CSS/JS (scoped).
+    # Header lines from _meta if provided
+    meta = modules.get("_meta") or {}
+    page_h2      = meta.get("_title") or "Multi-module report"
+    page_subline = meta.get("_subtitle")
+
+    header = _header_html(page_h2, provider, page_subline)
+
     buttons, panels, first = [], [], True
     for mod_name, data in modules.items():
         if mod_name == "_meta":
@@ -339,11 +434,15 @@ def fncWriteHTMLReportMulti(filename: str, modules: Dict[str, Dict[str, Any]]) -
         sid = _slug(mod_name)
         active = "active" if first else ""
 
+        # Nicer button label: prefer _tab_title > _title > prettified key
+        label = (data or {}).get("_tab_title") or (data or {}).get("_title") \
+                or _split_camel(mod_name.replace("_"," ")).title()
+
         sec_css, sec_js, container_class, expose_snippet = _collect_module_assets(provider, data)
         summary = _summary_html((data or {}).get("summary", {}))
         details = _details_html(data or {})
 
-        buttons.append(f'<button class="{active}" data-tab="{sid}">{_esc(mod_name)}</button>')
+        buttons.append(f'<button class="{active}" data-tab="{sid}">{_esc(label)}</button>')
         panels.append(f"""
 <section id="{sid}" class="tabpanel {active}">
   <style>{sec_css}</style>
@@ -374,7 +473,16 @@ function activate(id){
   history.replaceState(null,'','#'+id);
 }
 buttons.forEach(b=>b.addEventListener('click',()=>activate(b.dataset.tab)));
-const hash=location.hash.replace('#',''); if(hash){const el=document.getElementById(hash); if(el)activate(hash);}
+const hash=location.hash.replace('#','');
+if(hash){
+  const el=document.getElementById(hash);
+  if(el){ activate(hash); }
+}else{
+  // ensure only the first is visible on load
+  const firstPanel=panels[0]; const firstBtn=buttons[0];
+  if(firstPanel){ panels.forEach(p=>p.classList.remove('active')); firstPanel.classList.add('active'); }
+  if(firstBtn){ buttons.forEach(b=>b.classList.remove('active')); firstBtn.classList.add('active'); }
+}
 </script>
 """
 
