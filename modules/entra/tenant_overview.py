@@ -119,6 +119,70 @@ def _bool_to_yesno(v) -> str:
         return "Yes" if v else "No"
     return str(v)
 
+def _ensure_dict_rows(rows, required_keys=None):
+    """Return only dict rows; coerce/skip anything odd so tables don't explode."""
+    out = []
+    for r in rows or []:
+        if isinstance(r, dict):
+            out.append(r)
+        else:
+            # fall back to a single-column row with a stringified value
+            out.append({"id": str(r)})
+    if required_keys:
+        # make sure all requested headers exist
+        for r in out:
+            for k in required_keys:
+                r.setdefault(k, "")
+    return out
+
+def _iter_dict_rows(rows):
+    """Yield dict rows from an arbitrarily nested structure; coerce scalars."""
+    if rows is None:
+        return
+    stack = [rows]
+    while stack:
+        cur = stack.pop()
+        if isinstance(cur, dict):
+            yield cur
+        elif isinstance(cur, (list, tuple)):
+            # push children in reverse to preserve overall order
+            for x in reversed(cur):
+                stack.append(x)
+        else:
+            # scalar / unknown → wrap so tables don't explode
+            yield {"id": str(cur)}
+
+def _normalize_rows(rows, required_keys=None):
+    """Flatten to list[dict] and ensure required keys exist."""
+    out = list(_iter_dict_rows(rows))
+    if required_keys:
+        for r in out:
+            for k in required_keys:
+                r.setdefault(k, "")
+    return out
+
+def _force_rows(rows: Any, headers: List[str]) -> List[Dict[str, Any]]:
+    """
+    Flatten arbitrarily nested lists/tuples and coerce each row to a dict
+    containing only the requested headers (set to "" if missing).
+    Ensures fncToTable always gets list[dict].
+    """
+    out: List[Dict[str, Any]] = []
+    stack = [rows]
+    while stack:
+        cur = stack.pop()
+        if isinstance(cur, dict):
+            coerced = {h: cur.get(h, "") for h in headers}
+            out.append(coerced)
+        elif isinstance(cur, (list, tuple)):
+            # push children in reverse to preserve order
+            for x in reversed(cur):
+                stack.append(x)
+        else:
+            # scalar/unexpected node -> make a minimal row
+            out.append({h: "" for h in headers} | {"id": str(cur)})
+    return out
+
 # ------------------------- main -------------------------
 
 def run(client, args):
@@ -143,16 +207,86 @@ def run(client, args):
         return {"error": str(ex)}
 
     # ---------- Domains ----------
+    # ---------- Domains ----------
+    domain_headers = ["id", "isVerified", "isDefault", "authenticationType"]
+
     try:
-        domains = _get_domains_relaxed(client)
+        raw_domains = _get_domains_relaxed(client)
     except Exception as ex:
         fncPrintMessage(f"Failed to fetch domains: {ex}", "error")
-        domains = []
+        raw_domains = []
 
-    verified_count   = sum(1 for d in domains if str(d.get("isVerified")) == "True")
-    federated_count  = sum(1 for d in domains if str(d.get("authenticationType") or "").lower() == "federated")
-    managed_count    = sum(1 for d in domains if str(d.get("authenticationType") or "").lower() == "managed")
-    unknown_count    = max(0, len(domains) - federated_count - managed_count)
+    # Flatten -> list[dict] with guaranteed keys
+    domains = _force_rows(raw_domains, domain_headers)
+
+    # Final belt-and-braces sanitize before any table printing
+    def _sanitize_rows(rows, headers):
+        out = []
+        for r in rows or []:
+            if isinstance(r, dict):
+                out.append({h: r.get(h, "") for h in headers})
+            else:
+                # fallback: stringify the whole thing into the first column
+                out.append({h: "" for h in headers} | {"id": str(r)})
+        return out
+
+    domains = _sanitize_rows(domains, domain_headers)
+
+    # ---- Counts (robust to weird truthy strings) ----
+    def _boolish(v):
+        s = str(v).strip().lower()
+        return s in ("true", "1", "yes")
+
+    verified_count  = sum(1 for d in domains if _boolish(d.get("isVerified")))
+    # Normalise authN type values
+    def _atype(d):
+        return str(d.get("authenticationType", "") or "").strip().lower()
+    managed_count   = sum(1 for d in domains if _atype(d) in ("managed", "password") or _atype(d) == "")
+    federated_count = sum(1 for d in domains if _atype(d) == "federated")
+    unknown_count   = max(0, len(domains) - managed_count - federated_count)
+
+    if domains:
+        fncPrintMessage("Domains", "info")
+        print(fncToTable(domains, headers=domain_headers, max_rows=25))
+        if len(domains) > 25:
+            fncPrintMessage(f"Showing first 25 of {len(domains)} domains (export for full list).", "warn")
+
+
+    # --- harden: ensure list[dict] for fncToTable ---
+    if not all(isinstance(r, dict) for r in domains):
+        bad = [type(r).__name__ for r in domains if not isinstance(r, dict)]
+        fncPrintMessage(f"[tenant_overview] Coercing non-dict domain rows: {bad[:3]}...", "warn")
+        # Flatten again and drop anything that still isn't a dict
+        _flat: List[Dict[str, Any]] = []
+        def _walk(x):
+            if isinstance(x, dict):
+                _flat.append(x)
+            elif isinstance(x, (list, tuple)):
+                for y in x: _walk(y)
+            else:
+                # keep a minimal row so we don't lose info entirely
+                _flat.append({"id": str(x)})
+        _walk(raw_domains)
+        # ensure headers exist
+        for r in _flat:
+            for k in domain_headers:
+                r.setdefault(k, "")
+        domains = _flat
+
+    # Safe counters (handle non-bool/None gracefully)
+    def _boolish(v):
+        s = str(v).strip().lower()
+        return s in ("true", "1", "yes")
+
+    verified_count  = sum(1 for d in domains if _boolish(d.get("isVerified")))
+    federated_count = sum(1 for d in domains if str(d.get("authenticationType", "")).lower() == "federated")
+
+    if domains:
+        fncPrintMessage("Domains", "info")
+        print(fncToTable(domains, headers=domain_headers, max_rows=25))
+        if len(domains) > 25:
+            fncPrintMessage(f"Showing first 25 of {len(domains)} domains (export for full list).", "warn")
+
 
     # ---------- Branding ----------
     branding = []
@@ -255,12 +389,6 @@ def run(client, args):
     # ---------- Console output ----------
     fncPrintMessage("Tenant Overview Summary", "info")
     print(fncToTable(_kv_rows(summary), headers=["Field", "Value"], max_rows=9999))
-
-    if domains:
-        fncPrintMessage("Domains", "info")
-        print(fncToTable(domains, headers=["id", "isVerified", "isDefault", "authenticationType"], max_rows=25))
-        if len(domains) > 25:
-            fncPrintMessage(f"Showing first 25 of {len(domains)} domains (export for full list).", "warn")
 
     if branding_kv:
         fncPrintMessage("Branding", "info")
