@@ -2,7 +2,7 @@
 # File     : app_credentials_expiry.py
 # Purpose  : Enumerate Entra App/Service Principal credentials and
 #            identify expired / soon-to-expire secrets & certificates.
-# Notes    : Adds coloured output for expiring credentials (<30 orange, <10 red)
+# Notes    : Updated for CloudPoodle dashboard (KPIs, standouts, charts)
 # ================================================================
 
 from datetime import datetime, timezone
@@ -47,6 +47,11 @@ APP_CREDS_CSS = r"""
 
 /* Sticky header helps with long lists */
 .app-creds table thead th{ position:sticky; top:0; z-index:2 }
+
+/* Prevent long JSON/details (if any) from blowing out cells */
+.app-creds .cp-json, .app-creds .cp-json pre, .app-creds .cp-json code{
+  white-space: pre-wrap; word-break: break-word; overflow-x:hidden;
+}
 """
 
 APP_CREDS_JS = r"""
@@ -225,6 +230,37 @@ def _sort_days_key(r: Dict[str, Any]) -> Tuple[int, int]:
     days_num = days if isinstance(days, int) else 99999
     return (b_order.get(bucket, 6), days_num)
 
+# --------- standouts helpers ----------
+def _pick_soonest(rows: List[Dict[str, Any]], kind: str) -> Dict[str, Any] | None:
+    cands = [r for r in rows if r.get("credential")==kind]
+    if not cands: return None
+    cands.sort(key=_sort_days_key)
+    r = cands[0]
+    # scale “risk score” 0..10 (expired/critical ~ high)
+    days = r.get("daysRemaining")
+    if days is None: score = 3.0
+    else:
+        score = 10.0 if days < 0 else max(1.0, 10.0 - min(365, days)/36.5)
+    return {
+        "title": f"Soonest Expiring {kind}",
+        "name": f"{r.get('objectName')}",
+        "risk_score": float(round(score,2)),
+        "comment": f"{r.get('bucket').title()} — {days if days is not None else '?'} days left"
+    }
+
+def _highest_risk_object(rows: List[Dict[str, Any]]) -> Dict[str, Any] | None:
+    if not rows: return None
+    rows2 = sorted(rows, key=_sort_days_key)
+    r = rows2[0]
+    days = r.get("daysRemaining")
+    score = 10.0 if days is None else (10.0 if days < 0 else max(1.0, 10.0 - min(365, days)/36.5))
+    return {
+        "title": "Highest Risk Object",
+        "name": f"{r.get('objectName')} ({r.get('credential')})",
+        "risk_score": float(round(score,2)),
+        "comment": f"{r.get('bucket').title()} — {days if days is not None else '?'} days left"
+    }
+
 # ================================================================
 # Main Function
 # ================================================================
@@ -258,10 +294,14 @@ def run(client, args):
     app_rows.sort(key=_sort_days_key)
     sp_rows.sort(key=_sort_days_key)
 
+    # Combined list
+    all_rows = app_rows + sp_rows
+
     # Summaries
     app_summary = _summarise(app_rows)
     sp_summary = _summarise(sp_rows)
 
+    # ----- Console preview -----
     fncPrintMessage("Applications — Credential Expiry Summary", "info")
     print(fncToTable(
         [{"Field": k, "Value": v} for k, v in app_summary.items()],
@@ -290,22 +330,64 @@ def run(client, args):
             max_rows=20
         ))
 
+    # ---------- Dashboard metrics ----------
+    total_creds = app_summary["Total Credentials"] + sp_summary["Total Credentials"]
+    expired      = app_summary["Expired"] + sp_summary["Expired"]
+    critical     = app_summary["Critical (<10d)"] + sp_summary["Critical (<10d)"]
+    warning      = app_summary["Warning (<30d)"] + sp_summary["Warning (<30d)"]
+    le60         = app_summary["≤60 days"] + sp_summary["≤60 days"]
+    le90         = app_summary["≤90 days"] + sp_summary["≤90 days"]
+    gt90         = app_summary[">90 days"] + sp_summary[">90 days"]
+    unknown      = app_summary["Unknown"] + sp_summary["Unknown"]
+
+    # KPIs (appear at top)
+    kpis = [
+        {"label":"Total Credentials","value":str(total_creds),"tone":"primary","icon":"bi-collection"},
+        {"label":"Expired","value":str(expired),"tone":"secondary","icon":"bi-x-octagon"},
+        {"label":"Critical (<10d)","value":str(critical),"tone":"danger","icon":"bi-exclamation-octagon"},
+        {"label":"Warning (<30d)","value":str(warning),"tone":"warning","icon":"bi-exclamation-triangle"},
+        {"label":"≤60 days","value":str(le60),"tone":"info","icon":"bi-clock-history"},
+        {"label":"Unknown","value":str(unknown),"tone":"secondary","icon":"bi-question-circle"},
+    ]
+
+    # Standouts (3 tiles)
+    standouts = {}
+    hi_obj = _highest_risk_object(all_rows)
+    soon_secret = _pick_soonest(all_rows, "Secret")
+    soon_cert   = _pick_soonest(all_rows, "Certificate")
+    if hi_obj:      standouts["group"]    = hi_obj
+    if soon_secret: standouts["user"]     = soon_secret
+    if soon_cert:   standouts["computer"] = soon_cert
+
+    # Severity chart next to Summary
+    severity_labels = ["Expired","Critical","Warning","≤60d","≤90d",">90d","Unknown"]
+    severity_values = [expired, critical, warning, le60, le90, gt90, unknown]
+
     data = {
         "provider": "entra",
         "run_id": run_id,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "summary": {
-            "Total Credentials": app_summary["Total Credentials"] + sp_summary["Total Credentials"],
-            "Expired": app_summary["Expired"] + sp_summary["Expired"],
-            "Critical (<10d)": app_summary["Critical (<10d)"] + sp_summary["Critical (<10d)"],
-            "Warning (<30d)": app_summary["Warning (<30d)"] + sp_summary["Warning (<30d)"],
-            "≤60 days": app_summary["≤60 days"] + sp_summary["≤60 days"],
-            "≤90 days": app_summary["≤90 days"] + sp_summary["≤90 days"],
-            ">90 days": app_summary[">90 days"] + sp_summary[">90 days"],
-            "Unknown": app_summary["Unknown"] + sp_summary["Unknown"],
+            "Total Credentials": total_creds,
+            "Expired": expired,
+            "Critical (<10d)": critical,
+            "Warning (<30d)": warning,
+            "≤60 days": le60,
+            "≤90 days": le90,
+            ">90 days": gt90,
+            "Unknown": unknown,
         },
         "applications": app_rows,
         "servicePrincipals": sp_rows,
+
+        # ===== Dashboard bits =====
+        "_kpis": kpis,
+        "_standouts": standouts,
+        "_charts": {
+            "place": "summary",
+            "severity": {"labels": severity_labels, "data": severity_values},
+        },
+
         "_title": "App Credentials Expiry Overview",
         "_subtitle": "Secrets and Certificates nearing expiry across Applications & Service Principals",
         "_container_class": "app-creds",

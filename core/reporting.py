@@ -2,10 +2,12 @@
 # File     : core/reporting.py
 # Purpose  : Generate HTML reports (single + multi) with
 #            module-injected CSS/JS and optional extra sections.
+#            Now also supports a dashboard "cards" layout with KPIs,
+#            Standouts, and Charts (Chart.js).
 # ================================================================
 
 import os, html, datetime, re, json
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Tuple
 from core.utils import fncPrintMessage
 from handlers.logos import _logo_entra, _logo_aws, _logo_gcp, _logo_oracle
 
@@ -44,7 +46,7 @@ def _pretty_section_name(key: str, section_titles: Dict[str, str] | None = None)
     k = _split_camel(k.replace("_", " "))
     return k.title() or key.title()
 
-def _json_parse_maybe(val: Any):
+def _json_parse_maybe(val: Any) -> Tuple[bool, Any]:
     """Return (is_json, parsed_obj). Accept dict/list directly, or JSON string."""
     if isinstance(val, (dict, list)):
         return True, val
@@ -89,9 +91,9 @@ def _cell_html(val: Any) -> str:
 
 # ----- bucket helpers (for colored pills) -----
 
-def _bucket_class(bucket: str) -> str:
-    """Map a bucket label to a CSS class."""
-    b = (bucket or "").strip().lower()
+def _bucket_class(bucket: Any) -> str:
+    """Map a bucket label/value to a CSS class."""
+    b = str(bucket or "").strip().lower()
     if b == "expired":
         return "expired"
     if b in ("critical", "crit"):
@@ -272,7 +274,36 @@ color:#fff;border-color:transparent;box-shadow:0 4px 14px rgba(0,0,0,.20)}
   font-size:.9rem; line-height:1.4;
 }
 
+/* ======== Dashboard cards layout ======== */
+.grid{display:grid; gap:12px}
+.grid.kpis{grid-template-columns:repeat(auto-fit,minmax(220px,1fr))}
+.grid.three{grid-template-columns:repeat(auto-fit,minmax(260px,1fr))}
+.card-rounded{border-radius:12px; box-shadow:0 6px 18px rgba(0,0,0,.08); border:1px solid var(--border)}
+.kpi{padding:14px 16px}
+.kpi .top{display:flex; align-items:center; justify-content:space-between}
+.kpi .label{color:var(--muted); font-weight:600}
+.kpi .badge{border-radius:999px; padding:4px 10px; font-weight:700; font-size:.8rem; border:1px solid var(--border)}
+.kpi .value{font-size:1.8rem; font-weight:800; margin-top:4px}
+.kpi .delta{font-size:.9rem; opacity:.8}
+.badge.primary{background:#1f7ae0; color:#fff; border-color:transparent}
+.badge.success{background:#10b981; color:#fff; border-color:transparent}
+.badge.warning{background:#f59e0b; color:#111; border-color:transparent}
+.badge.danger{background:#ef4444; color:#fff; border-color:transparent}
+.badge.info{background:#0ea5e9; color:#fff; border-color:transparent}
+.badge.secondary{background:#6b7280; color:#fff; border-color:transparent}
+.badge.dark{background:#111827; color:#fff; border-color:transparent}
 
+.standout .title{font-weight:700; display:flex; align-items:center; gap:8px}
+.standout .score{font-size:1.4rem; font-weight:800; color:#ef4444}
+.standout .meta{color:var(--muted); font-size:.9rem}
+.charts{display:grid; grid-template-columns: 1.5fr 1fr; gap:12px}
+@media (max-width: 1000px){ .charts{grid-template-columns:1fr} }
+
+/* ===== Summary + Chart side-by-side ===== */
+.summary-grid{display:grid;grid-template-columns:1fr minmax(260px,420px);gap:12px;align-items:start}
+@media (max-width: 1100px){ .summary-grid{grid-template-columns:1fr} }
+.summary-chart.card-rounded{padding:10px 12px}
+.summary-chart .title{font-weight:700;margin-bottom:6px}
 """
 
 def _theme_css(provider: str | None) -> str:
@@ -309,6 +340,167 @@ def _header_html(title: str, provider: str | None, subtitle_small: str | None = 
   </div>
 """
 
+# ---------- dashboard renderers (new) ----------
+
+def _render_kpis(kpis: List[Dict[str, Any]]) -> str:
+    if not kpis: return ""
+    blocks = []
+    for k in kpis:
+        label = _esc(k.get("label",""))
+        value = _esc(k.get("value",""))
+        delta = _esc(k.get("delta",""))
+        tone  = _esc(k.get("tone","primary")) or "primary"
+        icon  = _esc(k.get("icon",""))
+        icon_html = f'<span class="bi {icon}" style="margin-right:6px"></span>' if icon else ""
+        delta_html = f'<div class="delta">{delta}</div>' if delta else ""
+        blocks.append(f"""
+        <div class="card-rounded kpi">
+          <div class="top">
+            <div class="label">{label}</div>
+            <span class="badge {tone}">{icon_html}{tone.title()}</span>
+          </div>
+          <div class="value">{value}</div>
+          {delta_html}
+        </div>""")
+    return f'<div class="grid kpis">{"".join(blocks)}</div>'
+
+def _render_standouts(standouts: Dict[str, Dict[str, Any]] | None) -> str:
+    s = standouts or {}
+    tiles = []
+    order = [("group","Highest Risk Group"), ("user","Highest Risk User"), ("computer","Highest Risk Computer")]
+    for key, fallback_title in order:
+        item = s.get(key)
+        if not item:
+            tiles.append(f"""
+            <div class="card-rounded standout" style="padding:14px 16px">
+              <div class="title">⭐ {fallback_title}</div>
+              <div class="meta">No data</div>
+            </div>""")
+            continue
+        title = _esc(item.get("title") or fallback_title)
+        name  = _esc(item.get("name",""))
+        score = item.get("risk_score", 0)
+        comment = _esc(item.get("comment",""))
+        tiles.append(f"""
+        <div class="card-rounded standout" style="padding:14px 16px">
+          <div class="title">⭐ {title}</div>
+          <div class="dflex" style="display:flex; align-items:center; justify-content:space-between; gap:8px">
+            <div>
+              <div class="fw" style="font-weight:700">{name}</div>
+              <div class="meta">{comment}</div>
+            </div>
+            <div class="score">{float(score):.2f}</div>
+          </div>
+        </div>""")
+    return f'<div class="grid three">{"".join(tiles)}</div>'
+
+def _render_charts(charts: Dict[str, Any] | None) -> Tuple[str, str, bool]:
+    """
+    Returns (html, js, needs_chartjs)
+    charts = {
+      "trend": {"labels":[...], "series":[{"label":"Findings","data":[...]}, ...]},
+      "severity": {"labels":[...], "data":[...] }
+    }
+    """
+    if not charts: return "", "", False
+    html_parts, js_parts = [], []
+    needs = False
+
+    # Trend line / area
+    if isinstance(charts.get("trend"), dict):
+        cid = f"chart-{os.urandom(4).hex()}"
+        t = charts["trend"]
+        labels = json.dumps(t.get("labels", []))
+        series = json.dumps([{"label": s.get("label","Series"), "data": s.get("data", [])} for s in t.get("series", [])])
+        html_parts.append(f"""
+        <div class="card-rounded" style="padding:12px 14px">
+          <div class="title" style="font-weight:700;margin-bottom:6px">Findings Over Time</div>
+          <canvas id="{cid}"></canvas>
+        </div>""")
+        js_parts.append(f"""
+        (()=>{{
+          const ctx=document.getElementById("{cid}");
+          const labels={labels};
+          const datasets={series}.map(s=>({{label:s.label,data:s.data,fill:true,tension:.35}}));
+          new Chart(ctx,{{type:'line',data:{{labels,datasets}},options:{{plugins:{{legend:{{position:'bottom'}}}},scales:{{y:{{beginAtZero:true}}}}}}}});
+        }})();""")
+        needs = True
+
+    # Severity doughnut
+    if isinstance(charts.get("severity"), dict):
+        cid = f"chart-{os.urandom(4).hex()}"
+        s = charts["severity"]
+        labels = json.dumps(s.get("labels", []))
+        data   = json.dumps(s.get("data", []))
+        html_parts.append(f"""
+        <div class="card-rounded" style="padding:12px 14px">
+          <div class="title" style="font-weight:700;margin-bottom:6px">Severity Breakdown</div>
+          <canvas id="{cid}"></canvas>
+        </div>""")
+        js_parts.append(f"""
+        (()=>{{
+          const ctx=document.getElementById("{cid}");
+          new Chart(ctx,{{type:'doughnut',data:{{labels:{labels},datasets:[{{data:{data}}}]}},options:{{plugins:{{legend:{{position:'bottom'}}}}}}}});
+        }})();""")
+        needs = True
+
+    if html_parts:
+        html = f'<div class="charts">{"".join(html_parts)}</div>'
+    else:
+        html = ""
+    return html, "\n".join(js_parts), needs
+
+def _summary_with_severity(summary: Dict[str, Any], severity_chart: Dict[str, Any]) -> tuple[str, str, bool]:
+    """
+    Render summary table next to a compact severity doughnut.
+    Returns (html, js, needs_chartjs).
+    """
+    if not summary:
+        summary_html = "<p>No summary data available.</p>"
+    else:
+        rows = "\n".join(f"<tr><th>{_esc(k)}</th><td>{_esc(v)}</td></tr>" for k, v in summary.items())
+        summary_html = f"<table class='summary'>{rows}</table>"
+
+    if not severity_chart:
+        return summary_html, "", False
+
+    cid = f"chart-{os.urandom(4).hex()}"
+    labels = json.dumps(severity_chart.get("labels", []))
+    data   = json.dumps(severity_chart.get("data", []))
+    chart_html = f"""
+    <div class="summary-chart card-rounded">
+      <div class="title">Severity Breakdown</div>
+      <canvas id="{cid}" height="220"></canvas>
+    </div>
+    """
+    js = f"""
+    (()=>{{
+      const ctx=document.getElementById("{cid}");
+      new Chart(ctx,{{type:'doughnut',data:{{labels:{labels},datasets:[{{data:{data}}}]}},
+        options:{{plugins:{{legend:{{position:'bottom'}}}}}}}});
+    }})();"""
+    html = f"<div class='summary-grid'><div>{summary_html}</div>{chart_html}</div>"
+    return html, js, True
+
+
+def _dashboard_html(data_dict: Dict[str, Any]) -> Tuple[str, str, bool]:
+    """
+    Returns (dashboard_html, dashboard_js, needs_chartjs)
+    Renders KPI cards, Standouts, and Charts if provided.
+    """
+    kpis = data_dict.get("_kpis") or []
+    standouts = data_dict.get("_standouts") or {}
+    charts = data_dict.get("_charts") or {}
+
+    pieces = []
+    if kpis:       pieces.append(_render_kpis(kpis))
+    if standouts:  pieces.append(_render_standouts(standouts))
+    ch_html, ch_js, needs = _render_charts(charts)
+    if ch_html:    pieces.append(ch_html)
+
+    return "\n".join(pieces), ch_js, needs
+
+
 # ---------- table/section renderers ----------
 
 def _render_table(rows: List[Dict[str, Any]], title: str) -> str:
@@ -327,7 +519,7 @@ def _render_table(rows: List[Dict[str, Any]], title: str) -> str:
             head_cells.append(f"<th>{_esc(c)}</th>")
     thead = "<tr>" + "".join(head_cells) + "</tr>"
 
-    body = []
+    body_rows = []
     for r in rows:
         tds = []
         row_bucket = r.get("bucket")
@@ -340,16 +532,7 @@ def _render_table(rows: List[Dict[str, Any]], title: str) -> str:
                 cls = _bucket_class(row_bucket) if row_bucket else _bucket_class(_bucket_from_days(raw))
                 tds.append(f"<td class='col-days'><span class='pill xs {cls}'>{_esc(raw)}</span></td>")
             else:
-                tds.append(f"<td>{_esc(_fmt_cell(raw))}</td>")
-        body.append("<tr>" + "".join(tds) + "</tr>")
-    
-    body_rows = []
-    for r in rows:
-        tds = []
-        for c in cols:
-            raw = r.get(c, "")
-            # Render with JSON-friendly dropdown when applicable
-            tds.append(f"<td>{_cell_html(raw)}</td>")
+                tds.append(f"<td>{_cell_html(raw)}</td>")
         body_rows.append("<tr>" + "".join(tds) + "</tr>")
 
     return f"""
@@ -389,7 +572,8 @@ def _details_html(data_dict: Dict[str, Any]) -> str:
     # Auto-render list[dict] tables for other keys
     for k, v in data_dict.items():
         if k in {"summary", "sections_html", "_inline_css", "_inline_js", "_styles", "_scripts",
-                 "_container_class", "_expose", "_title", "_subtitle", "_section_titles"}:
+                 "_container_class", "_expose", "_title", "_subtitle", "_section_titles",
+                 "_kpis", "_standouts", "_charts"}:
             continue
         if isinstance(v, list) and v and isinstance(v[0], dict):
             parts.append(_render_table(v, _pretty_section_name(k, section_titles)))
@@ -437,6 +621,7 @@ def _collect_module_assets(provider: str | None, data: Dict[str, Any]) -> tuple[
     container = data.get("_container_class") or ""
     return full_css, full_js, container, expose_script
 
+
 # ================================================================
 # Single-module report
 # ================================================================
@@ -451,8 +636,37 @@ def fncWriteHTMLReport(filename: str, module_name: str, data_dict: Dict[str, Any
     page_subline = data_dict.get("_subtitle")
 
     header  = _header_html(page_h2, provider, page_subline)
-    summary = _summary_html(data_dict.get("summary", {}))
+
+    # Optional dashboard section (boxes + charts)
+    dash_html, dash_js, needs_chartjs = _dashboard_html(data_dict)
+
+    # Handle chart placement: if _charts.place == "summary" (or _charts_place == "summary"),
+    # render the severity doughnut next to the summary table; otherwise keep old layout.
+    charts_spec = data_dict.get("_charts") or {}
+    place_summary = (charts_spec.get("place") == "summary") or (data_dict.get("_charts_place") == "summary")
+
+    summary_block_js = ""
+    needs_chartjs_summary = False
+    summary_data = data_dict.get("summary", {})
+    severity_spec = charts_spec.get("severity") if place_summary else None
+
+    if place_summary and severity_spec:
+        summary, sum_js, needs_chartjs_summary = _summary_with_severity(summary_data, severity_spec)
+        summary_block_js = sum_js
+        # prevent dashboard from rendering this same chart again
+        charts_spec = dict(charts_spec)
+        charts_spec.pop("severity", None)
+    else:
+        summary = _summary_html(summary_data)
+
+    # Build dashboard (now with possibly-trimmed charts_spec)
+    tmp = dict(data_dict)
+    tmp["_charts"] = charts_spec
+    dash_html, dash_js, needs_chartjs_dash = _dashboard_html(tmp)
+    needs_chartjs = needs_chartjs_summary or needs_chartjs_dash
     details = _details_html(data_dict)
+
+    chartjs_tag = '<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>' if needs_chartjs else ""
 
     html_doc = f"""<!DOCTYPE html>
 <html lang="en"><head>
@@ -461,6 +675,7 @@ def fncWriteHTMLReport(filename: str, module_name: str, data_dict: Dict[str, Any
 <style>{css}</style></head><body>
 {header}
 <div class="container{(' ' + _esc(container_class)) if container_class else ''}">
+  {dash_html}
   <h3>Summary</h3>
   {summary}
   {details}
@@ -470,6 +685,9 @@ def fncWriteHTMLReport(filename: str, module_name: str, data_dict: Dict[str, Any
   <p>&copy; {datetime.datetime.now(datetime.timezone.utc).year} CloudPoodle Framework</p>
 </div>
 {expose_snippet}
+{chartjs_tag}
+{f"<script>{summary_block_js}</script>" if summary_block_js else ""}
+{f"<script>{dash_js}</script>" if dash_js else ""}
 {f"<script>{js}</script>" if js else ""}
 </body></html>"""
 
@@ -477,6 +695,7 @@ def fncWriteHTMLReport(filename: str, module_name: str, data_dict: Dict[str, Any
     with open(filename, "w", encoding="utf-8") as f:
         f.write(html_doc)
     fncPrintMessage(f"HTML report written to {filename}", "success")
+
 
 # ================================================================
 # Multi-module report
@@ -513,21 +732,45 @@ def fncWriteHTMLReportMulti(filename: str, modules: Dict[str, Dict[str, Any]]) -
         label = (data or {}).get("_tab_title") or (data or {}).get("_title") \
                 or _split_camel(mod_name.replace("_"," ")).title()
 
-        sec_css, sec_js, container_class, expose_snippet = _collect_module_assets(provider, data)
-        summary = _summary_html((data or {}).get("summary", {}))
+        sec_css, sec_js, container_class, expose_snippet = _collect_module_assets(provider, data or {})
+        dash_html, dash_js, needs_chartjs = _dashboard_html(data or {})
+        charts_spec = (data or {}).get("_charts") or {}
+        place_summary = (charts_spec.get("place") == "summary") or ((data or {}).get("_charts_place") == "summary")
+
+        summary_block_js = ""
+        needs_chartjs_summary = False
+        summary_data = (data or {}).get("summary", {})
+        severity_spec = charts_spec.get("severity") if place_summary else None
+
+        if place_summary and severity_spec:
+            summary, sum_js, needs_chartjs_summary = _summary_with_severity(summary_data, severity_spec)
+            summary_block_js = sum_js
+            charts_spec = dict(charts_spec); charts_spec.pop("severity", None)
+        else:
+            summary = _summary_html(summary_data)
+
+        tmp = dict(data or {}); tmp["_charts"] = charts_spec
+        dash_html, dash_js, needs_chartjs_dash = _dashboard_html(tmp)
+        needs_chartjs = needs_chartjs_summary or needs_chartjs_dash
+
         details = _details_html(data or {})
+
+        chartjs_tag = '<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>' if needs_chartjs else ""
 
         buttons.append(f'<button class="{active}" data-tab="{sid}">{_esc(label)}</button>')
         panels.append(f"""
 <section id="{sid}" class="tabpanel {active}">
   <style>{sec_css}</style>
   <div class="container{(' ' + _esc(container_class)) if container_class else ''}">
+    {dash_html}
     <h3>Summary</h3>
     {summary}
     {details}
   </div>
-  {expose_snippet}
-  {f"<script>{sec_js}</script>" if sec_js else ""}
+    {chartjs_tag}
+    {f"<script>{summary_block_js}</script>" if summary_block_js else ""}
+    {f"<script>{dash_js}</script>" if dash_js else ""}
+    {f"<script>{sec_js}</script>" if sec_js else ""}
 </section>""")
         first = False
 
@@ -553,7 +796,6 @@ if(hash){
   const el=document.getElementById(hash);
   if(el){ activate(hash); }
 }else{
-  // ensure only the first is visible on load
   const firstPanel=panels[0]; const firstBtn=buttons[0];
   if(firstPanel){ panels.forEach(p=>p.classList.remove('active')); firstPanel.classList.add('active'); }
   if(firstBtn){ buttons.forEach(b=>b.classList.remove('active')); firstBtn.classList.add('active'); }

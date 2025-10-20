@@ -3,6 +3,7 @@
 # Purpose  : Retrieve and summarise core Entra tenant information
 # Notes    : Read-only Graph. Robust to schema differences. KV tables
 #            in console & HTML; module-scoped CSS/JS for light UX.
+#            Updated for CloudPoodle dashboard (KPIs, standouts, charts)
 # ================================================================
 
 from datetime import datetime, timezone
@@ -48,6 +49,13 @@ TENANT_OVERVIEW_CSS = r"""
 
 /* Sticky headers for long lists */
 .tenant-overview table thead th{ position:sticky; top:0; z-index:2 }
+
+/* Wrap long values in JSON/KV to avoid overflow */
+.tenant-overview .cp-json,
+.tenant-overview .cp-json pre,
+.tenant-overview .cp-json code{
+  white-space: pre-wrap; word-break: break-word; overflow-x: hidden;
+}
 """
 
 TENANT_OVERVIEW_JS = r"""
@@ -97,31 +105,19 @@ def _kv_rows(d: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 def _get_domains_relaxed(client) -> List[Dict[str, Any]]:
     """
-    Try domains with a fuller $select first. If Graph returns any error,
-    retry without known-problematic fields (e.g., isRootDomain) and
-    inject 'Not Found' for those fields.
+    Query domains using only v1.0-stable properties to avoid 400s.
     """
-    full = ["id", "isVerified", "isDefault", "isRootDomain", "authenticationType"]
+    select = ["id", "isVerified", "isDefault", "authenticationType"]
     try:
-        items = client.get_all(f"domains?$select={','.join(full)}")
-        return items
-    except Exception:
-        fncPrintMessage("Domain property not supported by this API/tenant... retrying without 'isRootDomain'.", "warn")
-        minimal = [f for f in full if f != "isRootDomain"]
-        try:
-            items = client.get_all(f"domains?$select={','.join(minimal)}")
-        except Exception as ex2:
-            # absolute fallback: fetch without $select at all
-            fncPrintMessage(
-                f"Retry without $select also failed ({ex2}); falling back to full domains listing.",
-                "warn"
-            )
-            items = client.get_all("domains")
+        return client.get_all(f"domains?$select={','.join(select)}")
+    except Exception as ex:
+        fncPrintMessage(f"Domains $select failed ({ex}); falling back to full 'domains'.", "warn")
+        return client.get_all("domains")
 
-        # make sure the missing field is present as "Not Found"
-        for it in items:
-            it.setdefault("isRootDomain", "Not Found")
-        return items
+def _bool_to_yesno(v) -> str:
+    if isinstance(v, bool):
+        return "Yes" if v else "No"
+    return str(v)
 
 # ------------------------- main -------------------------
 
@@ -154,7 +150,9 @@ def run(client, args):
         domains = []
 
     verified_count   = sum(1 for d in domains if str(d.get("isVerified")) == "True")
-    federated_count  = sum(1 for d in domains if str(d.get("authenticationType")).lower() == "federated")
+    federated_count  = sum(1 for d in domains if str(d.get("authenticationType") or "").lower() == "federated")
+    managed_count    = sum(1 for d in domains if str(d.get("authenticationType") or "").lower() == "managed")
+    unknown_count    = max(0, len(domains) - federated_count - managed_count)
 
     # ---------- Branding ----------
     branding = []
@@ -183,16 +181,21 @@ def run(client, args):
 
     branding_configured = bool(branding and any(v for k, v in branding[0].items() if k not in ("cdnList",)))
 
-    # ---------- Security Defaults (best-effort) ----------
+    # ---------- Security Defaults ----------
     sec_defaults_enabled = "Unknown"
     try:
-        sd = client.get("policies/identitySecurityDefaults") or {}
+        # Correct v1.0 endpoint:
+        # GET https://graph.microsoft.com/v1.0/policies/identitySecurityDefaultsEnforcementPolicy
+        sd = client.get("policies/identitySecurityDefaultsEnforcementPolicy") or {}
         if isinstance(sd, dict) and "isEnabled" in sd:
             sec_defaults_enabled = sd.get("isEnabled", "Unknown")
-    except Exception:
-        fncPrintMessage("Security Defaults policy not accessible (Policy.Read.All or endpoint not available).", "warn")
+    except Exception as ex:
+        fncPrintMessage(
+            f"Security Defaults policy not accessible (needs Policy.Read.All?) — {ex}",
+            "warn"
+        )
 
-    # ---------- Authorization Policy (best-effort) ----------
+    # ---------- Authorization Policy ----------
     authz_policy = {}
     default_user_role_summary = {}
     try:
@@ -249,7 +252,7 @@ def run(client, args):
         "License Units (Consumed)": total_consumed,
     }
 
-    # ---------- Console output (KV to avoid squashing) ----------
+    # ---------- Console output ----------
     fncPrintMessage("Tenant Overview Summary", "info")
     print(fncToTable(_kv_rows(summary), headers=["Field", "Value"], max_rows=9999))
 
@@ -269,23 +272,81 @@ def run(client, args):
         if len(lic_rows) > 20:
             fncPrintMessage(f"Showing first 20 of {len(lic_rows)} SKUs (export for full list).", "warn")
 
-    # ---------- Export payload ----------
-    # Convert policy dicts to KV lists so reporting renders them as tables.
+    kpis = [
+        {"label":"Total Domains","value":str(len(domains)),"tone":"primary","icon":"bi-globe2"},
+        {"label":"Verified Domains","value":str(verified_count),"tone":"success","icon":"bi-patch-check"},
+        {"label":"Federated Domains","value":str(federated_count),"tone":"warning","icon":"bi-diagram-3"},
+        {"label":"Branding Configured","value":_bool_to_yesno(branding_configured),"tone":"info","icon":"bi-brush"},
+        {"label":"Security Defaults","value":_bool_to_yesno(sec_defaults_enabled),"tone":"secondary","icon":"bi-shield-lock"},
+        {"label":"License SKUs","value":str(total_skus),"tone":"primary","icon":"bi-bag-check"},
+    ]
+    # Add utilisation if enabled pool is present
+    if total_enabled:
+        kpis.append({"label":"Licenses Used","value":f"{total_consumed}/{total_enabled}","tone":"secondary","icon":"bi-graph-up"})
+
+    standouts: Dict[str, Dict[str, Any]] = {}
+
+    if sec_defaults_enabled is False or str(sec_defaults_enabled).lower() == "false":
+        standouts["group"] = {
+            "title":"Security Defaults Disabled",
+            "name": org.get("displayName") or "Tenant",
+            "risk_score": 9.0,
+            "comment": "Consider enabling or enforcing Conditional Access"
+        }
+
+    if federated_count > 0:
+        standouts["user"] = {
+            "title":"Federated Identity in Use",
+            "name": f"{federated_count} domain(s)",
+            "risk_score": min(10.0, 6.0 + federated_count*0.5),
+            "comment": "Monitor federation trust & token signing cert rollover"
+        }
+
+    dur = default_user_role_summary or {}
+    risky_dur_flags = []
+    if str(dur.get("canAddGuests")).lower() == "true":
+        risky_dur_flags.append("Can add guests")
+    if str(dur.get("canCreateApps")).lower() == "true":
+        risky_dur_flags.append("Can create apps")
+    if str(dur.get("canCreateSecurityGroups")).lower() == "true":
+        risky_dur_flags.append("Can create security groups")
+    if risky_dur_flags:
+        standouts["computer"] = {
+            "title":"Open Default User Role",
+            "name": ", ".join(risky_dur_flags),
+            "risk_score": min(10.0, 5.0 + 1.5*len(risky_dur_flags)),
+            "comment": "Review authorizationPolicy.defaultUserRolePermissions"
+        }
+
+    chart_labels = ["Managed","Federated","Unknown"]
+    chart_values = [managed_count, federated_count, unknown_count]
     authorization_policy_kv = _kv_rows(authz_policy) if isinstance(authz_policy, dict) else []
     default_user_role_kv    = _kv_rows(default_user_role_summary) if isinstance(default_user_role_summary, dict) else []
+
     export_data = {
         "run_id": run_id,
         "timestamp": ts,
         "provider": "entra",
         "summary": summary,
+
         "domains": domains,
         "brandingKV": branding_kv,
         "authorizationPolicyKV": authorization_policy_kv,
         "defaultUserRoleKV": default_user_role_kv,
         "licenses": lic_rows,
+
+        "_kpis": kpis,
+        "_standouts": standouts,
+        "_charts": {
+            "place": "summary",
+            "domainTypes": {"labels": chart_labels, "data": chart_values},
+        },
+
         "_container_class": "tenant-overview",
         "_inline_css": TENANT_OVERVIEW_CSS,
         "_inline_js":  TENANT_OVERVIEW_JS,
+        "_title": "Tenant Overview",
+        "_subtitle": "Core Entra tenant configuration, domains, branding and licensing",
     }
 
     # Legacy per-module export support (kept just in case)
