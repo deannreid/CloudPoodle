@@ -63,7 +63,13 @@ def fncParseArguments():
         choices=["1","2"], 
         help="Evaluate CIS Level 1 or 2 and include a CIS dashboard"
     )
-    
+
+    parser.add_argument(
+        "--deep",
+        action="store_true",
+        help="Run deeper inspection (includes SP appRoleAssignments and additional graph calls)"
+    )
+
     parser.add_argument(
         "--export",
         nargs="*",
@@ -77,14 +83,6 @@ def fncParseArguments():
         action="store_true",
         help="Enable verbose debug output"
     )
-
-    if args.cis:
-        level = int(args.cis)
-        provider = (args.provider or "entra").lower()
-        cis_result = run_cis_dashboard(provider, level, modules_payloads, args)
-
-        results.append(("cis_dashboard", cis_result))
-
 
     return parser.parse_args()
 
@@ -115,11 +113,11 @@ def fncInitClient(provider: str, cfg: dict):
         )
 
     elif provider == "aws":
-        fncPrintMessage("AWS support coming soon — the Poodle is still training.", "warn")
+        fncPrintMessage("AWS support coming soon - the Poodle is still training.", "warn")
         return None
 
     elif provider == "gcp":
-        fncPrintMessage("GCP support coming soon — the Poodle's fetching biscuits.", "warn")
+        fncPrintMessage("GCP support coming soon - the Poodle's fetching biscuits.", "warn")
         return None
 
     else:
