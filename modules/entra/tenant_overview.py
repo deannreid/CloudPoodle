@@ -8,6 +8,7 @@
 
 from datetime import datetime, timezone
 from typing import Dict, Any, List, Tuple
+from datetime import timedelta
 import requests
 
 from core.utils import (
@@ -174,7 +175,7 @@ OVERVIEW_JS = r"""
 })();
 """
 
-# ------------------------- helpers -------------------------
+# ----------------------- Helpers -----------------------
 
 def _iso_now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -338,7 +339,7 @@ def _summarise_licenses(skus: List[Dict[str,Any]]) -> List[Dict[str,Any]]:
     out.sort(key=lambda r: (r["utilisationPct"], r["consumed"]), reverse=True)
     return out
 
-# ------------------------- main -------------------------
+# ----- Extra overview enrichments -----
 
 CRITICAL_ROLE_NAMES = [
     "Global Administrator",
@@ -829,9 +830,10 @@ def run(client, args):
         "_inline_js": OVERVIEW_JS,
     }
 
+    # Optional HTML report output
     if getattr(args, "html", None):
-        html_path  = args.html if args.html.endswith(".html") else args.html + ".html"
-        fncWriteHTMLReport(html_path , "tenant_overview", html_path )
+        path = args.html if args.html.endswith(".html") else args.html + ".html"
+        fncWriteHTMLReport(path, "tenant_overview", data)
 
     fncPrintMessage("Tenant Overview module complete.", "success")
     return data
