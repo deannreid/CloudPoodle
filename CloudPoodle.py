@@ -59,6 +59,12 @@ def fncParseArguments():
     )
 
     parser.add_argument(
+        "--cis", 
+        choices=["1","2"], 
+        help="Evaluate CIS Level 1 or 2 and include a CIS dashboard"
+    )
+    
+    parser.add_argument(
         "--export",
         nargs="*",
         metavar="FMT[,FMT...]",
@@ -71,6 +77,14 @@ def fncParseArguments():
         action="store_true",
         help="Enable verbose debug output"
     )
+
+    if args.cis:
+        level = int(args.cis)
+        provider = (args.provider or "entra").lower()
+        cis_result = run_cis_dashboard(provider, level, modules_payloads, args)
+
+        results.append(("cis_dashboard", cis_result))
+
 
     return parser.parse_args()
 

@@ -1,0 +1,350 @@
+{
+  "version": "1.0",
+  "profile": "CIS Microsoft 365 Foundations (Entra) — Level 2",
+  "rules": [
+    {
+      "id": "2.1",
+      "level": 2,
+      "title": "Security Defaults enabled (strict)",
+      "description": "Require tenant-wide Security Defaults to be enabled unless a stronger CA baseline is in place.",
+      "severity": "high",
+      "source": { "module": "tenant_overview", "path": "summary.Security Defaults Enabled" },
+      "test": { "op": "equals", "value": true },
+      "pass_message": "Security Defaults are enabled.",
+      "fail_message": "Security Defaults are disabled.",
+      "remediation": "Enable Security Defaults or document/enforce an equivalent Conditional Access baseline.",
+      "tags": ["tenant","baseline","l2"]
+    },
+    {
+      "id": "2.2",
+      "level": 2,
+      "title": "Global Administrators ≤ 3",
+      "description": "Further limit Global Administrator assignments to 3 or fewer.",
+      "severity": "high",
+      "source": { "module": "user_assessment", "path": "role_assignments_overview[Role=Global Administrator].Assignees" },
+      "test": { "op": "lte", "value": 3 },
+      "pass_message": "Global Admin count ≤ 3.",
+      "fail_message": "More than 3 Global Admins assigned.",
+      "remediation": "Reduce GA assignments; use PIM for just-in-time access.",
+      "tags": ["roles","privileged","l2"]
+    },
+    {
+      "id": "2.3",
+      "level": 2,
+      "title": "No guest accounts with any directory role",
+      "description": "Guests must not hold directory roles.",
+      "severity": "high",
+      "source": { "module": "user_assessment", "path": "user_details" },
+      "test": {
+        "op": "count_where",
+        "filter": "Type == 'Guest' && (Dir Roles || 0) > 0",
+        "compare": { "op": "eq", "value": 0 }
+      },
+      "pass_message": "No guest users have directory roles.",
+      "fail_message": "Guest users with directory roles detected.",
+      "remediation": "Remove directory roles from guest users.",
+      "tags": ["roles","guests","l2"]
+    },
+    {
+      "id": "2.4",
+      "level": 2,
+      "title": "100% MFA for privileged users",
+      "description": "All users with directory roles must have MFA-capable methods present.",
+      "severity": "high",
+      "source": { "module": "user_assessment" },
+      "test": {
+        "op": "ratio_gte",
+        "numerator_path": "user_details[Dir Roles>0 && Details.Signals.MFA_Present==true]",
+        "denominator_path": "user_details[Dir Roles>0]",
+        "value": 1.0
+      },
+      "pass_message": "All privileged users have MFA.",
+      "fail_message": "One or more privileged users lack MFA.",
+      "remediation": "Require MFA for all privileged accounts.",
+      "tags": ["mfa","privileged","l2"]
+    },
+    {
+      "id": "2.5",
+      "level": 2,
+      "title": "MFA enrollment rate ≥ 95%",
+      "description": "Raise MFA adoption target to 95% of active users.",
+      "severity": "medium",
+      "source": { "module": "user_assessment" },
+      "test": {
+        "op": "ratio_gte",
+        "numerator_path": "summary.MFA Enrolled",
+        "denominator_path": "summary.Total Users",
+        "value": 0.95
+      },
+      "pass_message": "MFA enrollment ≥ 95%.",
+      "fail_message": "MFA enrollment below 95%.",
+      "remediation": "Mandate MFA registration with user campaigns and policy enforcement.",
+      "tags": ["mfa","adoption","l2"]
+    },
+    {
+      "id": "2.6",
+      "level": 2,
+      "title": "No risky users present",
+      "description": "Identity Protection should report zero risky users.",
+      "severity": "high",
+      "source": { "module": "user_assessment", "path": "summary.Risky Users (if permitted)" },
+      "test": { "op": "equals", "value": 0 },
+      "pass_message": "No risky users reported.",
+      "fail_message": "Risky users detected.",
+      "remediation": "Investigate risky users and remediate sign-ins and credentials.",
+      "tags": ["risk","identity-protection","l2"]
+    },
+    {
+      "id": "2.7",
+      "level": 2,
+      "title": "SMS sign-in disabled for all users",
+      "description": "Disallow SMS sign-in; prefer stronger methods.",
+      "severity": "medium",
+      "source": { "module": "user_assessment", "path": "user_details" },
+      "test": {
+        "op": "count_where",
+        "filter": "(Details.Signals || {}).sms_signin_enabled == true",
+        "compare": { "op": "eq", "value": 0 }
+      },
+      "pass_message": "No users have SMS sign-in enabled.",
+      "fail_message": "Users with SMS sign-in enabled detected.",
+      "remediation": "Disable SMS sign-in; enforce stronger MFA methods.",
+      "tags": ["auth-methods","mfa","l2"]
+    },
+    {
+      "id": "2.8",
+      "level": 2,
+      "title": "No stale enabled accounts (>30 days without sign-in)",
+      "description": "Tighten stale window for enabled accounts to 30 days.",
+      "severity": "medium",
+      "source": { "module": "user_assessment", "path": "user_details" },
+      "test": {
+        "op": "count_where",
+        "filter": "Status == 'Enabled' && (Details.General.LastSignInDays || 99999) > 30",
+        "compare": { "op": "eq", "value": 0 }
+      },
+      "pass_message": "No enabled accounts stale >30 days.",
+      "fail_message": "Enabled accounts stale >30 days detected.",
+      "remediation": "Disable or review stale accounts promptly.",
+      "tags": ["lifecycle","hygiene","l2"]
+    },
+    {
+      "id": "2.9",
+      "level": 2,
+      "title": "No disabled accounts with MFA or roles",
+      "description": "Disabled accounts should not retain MFA enrollments or directory roles.",
+      "severity": "low",
+      "source": { "module": "user_assessment", "path": "user_details" },
+      "test": {
+        "op": "count_where",
+        "filter": "Status == 'Disabled' && ((Dir Roles || 0) > 0 || Details.Signals.MFA_Present == true)",
+        "compare": { "op": "eq", "value": 0 }
+      },
+      "pass_message": "Disabled accounts have no MFA or roles.",
+      "fail_message": "Disabled accounts retain MFA or roles.",
+      "remediation": "Remove roles and clear strong auth methods from disabled accounts.",
+      "tags": ["hygiene","roles","mfa","l2"]
+    },
+    {
+      "id": "2.10",
+      "level": 2,
+      "title": "No federated domains",
+      "description": "Eliminate federation unless strictly required and monitored.",
+      "severity": "medium",
+      "source": { "module": "tenant_overview", "path": "summary.Federated Domains" },
+      "test": { "op": "equals", "value": 0 },
+      "pass_message": "No federated domains configured.",
+      "fail_message": "Federated domains present.",
+      "remediation": "Migrate to managed authentication or document strong governance for federation.",
+      "tags": ["domains","federation","l2"]
+    },
+    {
+      "id": "2.11",
+      "level": 2,
+      "title": "Default users cannot add guests",
+      "description": "Harden default user role to disallow guest invitations.",
+      "severity": "medium",
+      "source": { "module": "tenant_overview", "path": "defaultUserRoleKV[Field=canAddGuests].Value" },
+      "test": { "op": "equals", "value": false },
+      "pass_message": "Default users cannot add guests.",
+      "fail_message": "Default users can add guests.",
+      "remediation": "Set authorizationPolicy.defaultUserRolePermissions.allowedToInviteGuests=false.",
+      "tags": ["authorizationPolicy","guests","l2"]
+    },
+    {
+      "id": "2.12",
+      "level": 2,
+      "title": "Default users cannot create apps",
+      "description": "Harden default user role to prevent ungoverned app registrations.",
+      "severity": "medium",
+      "source": { "module": "tenant_overview", "path": "defaultUserRoleKV[Field=canCreateApps].Value" },
+      "test": { "op": "equals", "value": false },
+      "pass_message": "Default users cannot create apps.",
+      "fail_message": "Default users can create apps.",
+      "remediation": "Set authorizationPolicy.defaultUserRolePermissions.allowedToCreateApps=false.",
+      "tags": ["authorizationPolicy","apps","l2"]
+    },
+    {
+      "id": "2.13",
+      "level": 2,
+      "title": "Default users cannot create security groups",
+      "description": "Harden default user role to prevent uncontrolled group creation.",
+      "severity": "low",
+      "source": { "module": "tenant_overview", "path": "defaultUserRoleKV[Field=canCreateSecurityGroups].Value" },
+      "test": { "op": "equals", "value": false },
+      "pass_message": "Default users cannot create security groups.",
+      "fail_message": "Default users can create security groups.",
+      "remediation": "Set authorizationPolicy.defaultUserRolePermissions.allowedToCreateSecurityGroups=false.",
+      "tags": ["authorizationPolicy","groups","l2"]
+    },
+    {
+      "id": "2.14",
+      "level": 2,
+      "title": "No groups assigned directory roles",
+      "description": "Disallow directory role assignment to groups.",
+      "severity": "high",
+      "source": { "module": "group_audit", "path": "group_details" },
+      "test": {
+        "op": "count_where",
+        "filter": "(Details.DirectoryRoleAssignments || []).length > 0",
+        "compare": { "op": "eq", "value": 0 }
+      },
+      "pass_message": "No groups with directory roles.",
+      "fail_message": "Groups with directory roles detected.",
+      "remediation": "Use PIM for user-based elevation; remove group role assignments.",
+      "tags": ["groups","roles","l2"]
+    },
+    {
+      "id": "2.15",
+      "level": 2,
+      "title": "Privileged groups: no guest members",
+      "description": "If any group is privileged, it must not include guest members.",
+      "severity": "high",
+      "source": { "module": "group_audit", "path": "group_details" },
+      "test": {
+        "op": "none_match",
+        "filter": "(Details.DirectoryRoleAssignments || []).length > 0 && ((Details.Counts || {}).guests || 0) > 0"
+      },
+      "pass_message": "Privileged groups contain no guest members.",
+      "fail_message": "Guest members found in privileged groups.",
+      "remediation": "Remove guest members from privileged groups.",
+      "tags": ["groups","guests","l2"]
+    },
+    {
+      "id": "2.16",
+      "level": 2,
+      "title": "Privileged groups: no service principal owners or members",
+      "description": "Privileged groups should not be owned by or include service principals.",
+      "severity": "medium",
+      "source": { "module": "group_audit", "path": "group_details" },
+      "test": {
+        "op": "none_match",
+        "filter": "(Details.DirectoryRoleAssignments || []).length > 0 && ( (Details['Owners (Service Principals)'] || []).length > 0 || ((Details.Counts || {}).sps || 0) > 0 )"
+      },
+      "pass_message": "No SP owners/members in privileged groups.",
+      "fail_message": "Service principals found as owners/members of privileged groups.",
+      "remediation": "Replace SP owners with accountable humans; remove SP membership and use app roles.",
+      "tags": ["groups","service-principals","l2"]
+    },
+    {
+      "id": "2.17",
+      "level": 2,
+      "title": "No dynamic membership groups with directory roles",
+      "description": "Dynamic groups should not be granted directory roles.",
+      "severity": "medium",
+      "source": { "module": "group_audit", "path": "group_details" },
+      "test": {
+        "op": "none_match",
+        "filter": "Details.General.Dynamic == true && (Details.DirectoryRoleAssignments || []).length > 0"
+      },
+      "pass_message": "No dynamic groups have directory roles.",
+      "fail_message": "Dynamic groups with directory roles detected.",
+      "remediation": "Remove role assignments from dynamic groups; use targeted eligible user assignments.",
+      "tags": ["groups","dynamic","roles","l2"]
+    },
+    {
+      "id": "2.18",
+      "level": 2,
+      "title": "No broad app-role grants to guest-containing groups",
+      "description": "Groups with guest members should not receive app role assignments.",
+      "severity": "medium",
+      "source": { "module": "group_audit", "path": "group_details" },
+      "test": {
+        "op": "none_match",
+        "filter": "((Details.Counts || {}).guests || 0) > 0 && ((Details.Counts || {}).appRoles || 0) > 0"
+      },
+      "pass_message": "No app roles granted to guest-containing groups.",
+      "fail_message": "App roles assigned to groups that include guests.",
+      "remediation": "Split access: use separate internal-only groups for app roles.",
+      "tags": ["groups","approles","guests","l2"]
+    },
+    {
+      "id": "2.19",
+      "level": 2,
+      "title": "All app/SP credentials > 90 days remaining",
+      "description": "No credentials should be within 90 days of expiry.",
+      "severity": "medium",
+      "source": { "module": "app_credentials_expiry" },
+      "test": {
+        "op": "all",
+        "checks": [
+          { "path": "summary.Critical (<10d)", "op": "equals", "value": 0 },
+          { "path": "summary.Warning (<30d)",  "op": "equals", "value": 0 },
+          { "path": "summary.≤60 days",        "op": "equals", "value": 0 },
+          { "path": "summary.≤90 days",        "op": "equals", "value": 0 }
+        ]
+      },
+      "pass_message": "All credentials have >90 days remaining.",
+      "fail_message": "One or more credentials expire within 90 days.",
+      "remediation": "Adopt a rotation policy to keep credentials well ahead of expiry.",
+      "tags": ["apps","credentials","l2"]
+    },
+    {
+      "id": "2.20",
+      "level": 2,
+      "title": "Unknown credential expiries resolved",
+      "description": "Eliminate unknown expiry dates in app/SP credentials.",
+      "severity": "low",
+      "source": { "module": "app_credentials_expiry", "path": "summary.Unknown" },
+      "test": { "op": "equals", "value": 0 },
+      "pass_message": "No credentials with unknown expiry.",
+      "fail_message": "Credentials with unknown expiry detected.",
+      "remediation": "Standardize credential management and record expiries.",
+      "tags": ["apps","credentials","visibility","l2"]
+    },
+    {
+      "id": "2.21",
+      "level": 2,
+      "title": "No guest Global Administrators",
+      "description": "Do not assign Global Administrator to guest accounts.",
+      "severity": "high",
+      "source": { "module": "user_assessment", "path": "user_details" },
+      "test": {
+        "op": "count_where",
+        "filter": "Type == 'Guest' && (Details.DirectoryRoles || []).includes('Global Administrator')",
+        "compare": { "op": "eq", "value": 0 }
+      },
+      "pass_message": "No guest GAs.",
+      "fail_message": "Guest GA detected.",
+      "remediation": "Remove GA from guest accounts immediately.",
+      "tags": ["roles","guests","admins","l2"]
+    },
+    {
+      "id": "2.22",
+      "level": 2,
+      "title": "Privileged users are active (≤30 days since last sign-in)",
+      "description": "Tight usage window for accounts with directory roles.",
+      "severity": "medium",
+      "source": { "module": "user_assessment", "path": "user_details" },
+      "test": {
+        "op": "count_where",
+        "filter": "(Dir Roles || 0) > 0 && (Details.General.LastSignInDays || 99999) > 30",
+        "compare": { "op": "eq", "value": 0 }
+      },
+      "pass_message": "All privileged users active within 30 days.",
+      "fail_message": "Stale privileged users detected.",
+      "remediation": "Disable or remove stale privileged accounts; rotate to active owners.",
+      "tags": ["privileged","lifecycle","l2"]
+    }
+  ]
+}

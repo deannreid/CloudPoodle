@@ -2,6 +2,8 @@
 # File     : client.py
 # Purpose  : Microsoft Graph API read-only client for Entra (Azure AD)
 # Notes    : Read-only: GET + pagination + retries. No destructive ops.
+#            - Auto-refresh token on 401
+#            - Proactive refresh if token expires in <5 minutes
 # ================================================================
 
 import os
@@ -12,18 +14,8 @@ import getpass
 from typing import Dict, Any, List, Optional
 from core.utils import fncPrintMessage, fncRetry
 
-# ================================================================
-# Class    : GraphClient
-# Purpose  : Read-only wrapper for Microsoft Graph API
-# Notes    : Uses client credentials (app-only). Ensure app has
-#           the required Application permissions (read-only) and
-#           admin consent granted.
-#           Example app perms to grant:
-#             - Directory.Read.All (Application)
-#             - Application.Read.All (Application)
-#             - RoleManagement.Read.Directory (Application)
-#             - Policy.Read.All (Application)
-# ================================================================
+GRAPH_ROOT = "https://graph.microsoft.com/v1.0"
+
 class GraphClient:
     def __init__(
         self,
@@ -71,41 +63,56 @@ class GraphClient:
             authority=self.authority,
         )
 
-        self.token = self._fncGetAccessToken()
-        self.headers = {
-            "Authorization": f"Bearer {self.token}",
-            "Content-Type": "application/json",
-        }
+        # token/bookkeeping
+        self.token: str = ""
+        self._token_expires_on: int = 0  # epoch seconds
+        self._set_token(self._acquire_token())
 
         fncPrintMessage("GraphClient initialised (read-only).", "success")
 
-    # ================================================================
-    # Function: _fncGetAccessToken
-    # Purpose : Obtain OAuth2 token using MSAL (with silent cache fallback)
-    # Notes   : Uses client credentials flow; error raised if token cannot be acquired
-    # ================================================================
-    def _fncGetAccessToken(self) -> str:
+    # ---------- Token helpers ----------
+
+    def _acquire_token(self) -> Dict[str, Any]:
+        """Acquire a token using MSAL (silent -> client creds). Returns MSAL result dict."""
         fncPrintMessage("Requesting Microsoft Graph access token...", "debug")
         result = self.app.acquire_token_silent(self.scope, account=None)
         if not result:
             result = self.app.acquire_token_for_client(scopes=self.scope)
-
         if "access_token" not in result:
             fncPrintMessage(
                 f"MSAL Authentication failed: {result.get('error_description', 'Unknown error')}",
                 "error",
             )
             raise Exception("Failed to acquire access token")
+        return result
 
-        fncPrintMessage("Access token acquired successfully.", "debug")
-        return result["access_token"]
+    def _set_token(self, msal_result: Dict[str, Any]) -> None:
+        """Store token and expiry from MSAL result."""
+        self.token = msal_result["access_token"]
+        try:
+            self._token_expires_on = int(msal_result.get("expires_on") or 0)
+        except Exception:
+            self._token_expires_on = 0
+        if not self._token_expires_on:
+            self._token_expires_on = int(time.time()) + int(msal_result.get("expires_in", 3600))
 
-    # ================================================================
-    # Function: fncHandleResponse
-    # Purpose : Handle Graph responses, follow @odata.nextLink and retry 429
-    # Notes   : Returns parsed JSON; raises for >=400 (non-429) responses
-    # ================================================================
-    def fncHandleResponse(self, response: requests.Response) -> Dict[str, Any]:
+    def _ensure_fresh_token(self) -> None:
+        """Proactively refresh token if it expires in <5 minutes."""
+        now = int(time.time())
+        if now >= (self._token_expires_on - 300):  # <5 minutes remaining
+            fncPrintMessage("Refreshing access token (nearing expiry)...", "debug")
+            self._set_token(self._acquire_token())
+
+    def _auth_headers(self) -> Dict[str, str]:
+        return {
+            "Authorization": f"Bearer {self.token}",
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        }
+
+    # ---------- HTTP handling ----------
+
+    def _handle_response(self, response: requests.Response) -> Dict[str, Any]:
         status = response.status_code
 
         # Success
@@ -117,14 +124,33 @@ class GraphClient:
             retry_after = int(response.headers.get("Retry-After", 5))
             fncPrintMessage(f"Rate limit hit. Sleeping for {retry_after}s...", "warn")
             time.sleep(retry_after)
-            # Re-send same request
             req = response.request
-            resp = requests.request(method=req.method, url=req.url, headers=self.headers, data=req.body)
-            return self.fncHandleResponse(resp)
+            resp = requests.request(method=req.method, url=req.url, headers=self._auth_headers(), data=req.body)
+            return self._handle_response(resp)
+
+        # Unauthorized (refresh and retry once)
+        if status == 401:
+            try:
+                body = response.json()
+            except Exception:
+                body = {}
+            err = (body.get("error") or {})
+            code = err.get("code") or ""
+            msg = err.get("message") or ""
+            if "InvalidAuthenticationToken" in code or "expired" in str(msg).lower():
+                fncPrintMessage("Access token expired — refreshing and retrying once...", "warn")
+                self._set_token(self._acquire_token())
+                req = response.request
+                resp = requests.request(method=req.method, url=req.url, headers=self._auth_headers(), data=req.body)
+                if resp.status_code == 200:
+                    return resp.json()
+                # fall through to generic error handling below if still failing
+            fncPrintMessage(f"Unauthorized (401): {response.text}", "error")
+            raise Exception("Graph API request failed with status 401")
 
         # Other client/server errors
         if status >= 400:
-            fncPrintMessage(f"Graph API Error [{status}] → {response.text}", "error")
+            fncPrintMessage(f"Graph API Error [{status}] -> {response.text}", "error")
             raise Exception(f"Graph API request failed with status {status}")
 
         # Fallback
@@ -133,51 +159,51 @@ class GraphClient:
         except Exception:
             return {"status": status, "text": response.text}
 
-    # ================================================================
-    # Function: get
-    # Purpose : Perform a GET request to a Graph endpoint (single page)
-    # Notes   : Use get_all for paginated resources
-    # ================================================================
-    def get(self, endpoint: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        url = f"https://graph.microsoft.com/v1.0/{endpoint.lstrip('/')}"
-        fncPrintMessage(f"GET {url}", "debug")
-        return fncRetry(lambda: self.fncHandleResponse(requests.get(url, headers=self.headers, params=params)))
+    def _request(self, method: str, url: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Single HTTP request with proactive token refresh and 401 auto-refresh retry."""
+        self._ensure_fresh_token()
+        resp = requests.request(method, url, headers=self._auth_headers(), params=params)
+        return self._handle_response(resp)
 
-    # ================================================================
-    # Function: get_all
-    # Purpose : Retrieve all items from a paginated Graph endpoint
-    # Notes   : Returns a flat list of items (value) for list endpoints
-    # ================================================================
+    # ---------- Public API ----------
+
+    def get(self, endpoint: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """
+        Perform a GET request to a Graph endpoint (single page).
+        Use get_all for paginated resources.
+        """
+        url = f"{GRAPH_ROOT}/{endpoint.strip().lstrip('/')}"
+        fncPrintMessage(f"GET {url}", "debug")
+        return fncRetry(lambda: self._request("GET", url, params=params))
+
     def get_all(self, endpoint: str, params: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
         """
+        Retrieve all items from a paginated Graph endpoint.
+        Returns a flat list of items (value) for list endpoints.
         Example: client.get_all("applications?$select=id,displayName")
         """
-        url = f"https://graph.microsoft.com/v1.0/{endpoint.lstrip('/')}"
+        url = f"{GRAPH_ROOT}/{endpoint.strip().lstrip('/')}"
         fncPrintMessage(f"GET (all pages) {url}", "debug")
 
         def _single_page(req_url):
-            resp = requests.get(req_url, headers=self.headers, params=params)
-            return self.fncHandleResponse(resp)
+            return self._request("GET", req_url, params=params)
 
         data = fncRetry(lambda: _single_page(url))
         items: List[Dict[str, Any]] = []
 
-        # If the response is a single resource (not a list)
         if isinstance(data, dict) and "value" not in data:
-            # Not a collection — return as single-element list for convenience
             return [data]
 
         if isinstance(data, dict) and "value" in data:
             items.extend(data.get("value", []))
             next_link = data.get("@odata.nextLink")
         else:
-            # Unexpected shape — return empty
             return items
 
         while next_link:
-            fncPrintMessage(f"Following nextLink → {next_link}", "debug")
-            resp = requests.get(next_link, headers=self.headers)
-            page = self.fncHandleResponse(resp)
+            fncPrintMessage(f"Following nextLink -> {next_link}", "debug")
+
+            page = fncRetry(lambda: self._request("GET", next_link))
             if isinstance(page, dict):
                 items.extend(page.get("value", []))
                 next_link = page.get("@odata.nextLink")
