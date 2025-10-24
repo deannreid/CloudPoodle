@@ -35,7 +35,7 @@ class GraphClient:
             client_id = input("Enter Application (Client) ID: ").strip()
         if not client_secret:
             fncPrintMessage(
-                "No Client Secret found — it will be hidden as you type. "
+                "No Client Secret found *Hidden* "
                 "Credentials are stored in environment only for this session.",
                 "warn",
             )
@@ -138,7 +138,7 @@ class GraphClient:
             code = err.get("code") or ""
             msg = err.get("message") or ""
             if "InvalidAuthenticationToken" in code or "expired" in str(msg).lower():
-                fncPrintMessage("Access token expired — refreshing and retrying once...", "warn")
+                fncPrintMessage("Access token expired, Attempting Refresh.", "warn")
                 self._set_token(self._acquire_token())
                 req = response.request
                 resp = requests.request(method=req.method, url=req.url, headers=self._auth_headers(), data=req.body)
