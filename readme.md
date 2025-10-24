@@ -1,159 +1,194 @@
-# 🐩 CloudPoodle - Modular Cloud Auditing Framework
+# 🐩 CloudPoodle — Modular Cloud Auditing Framework
 
-> “Because every cloud deserves a good sniff.”
+> “because every cloud deserves a good sniff.”
 
-CloudPoodle is a modular cloud security and compliance auditing framework built in Python.  
-It provides a unified interface for pulling, analysing, and reporting metadata from multiple cloud identity providers, starting with **Microsoft Entra (Azure AD)**, and extending to **AWS**, **Google Cloud**, and **Oracle Cloud**.
-
----
-
-## ✨ Features (Current & Planned)
-
-| Module | Status | Description |
-|---------|--------|-------------|
-| **Entra (Azure AD)** | ⚠ Working On | Enumerates tenant, domains, app credentials, and configuration. |
-| **AWS** | 🚧 Planned | Read-only inventory of IAM users, access keys, and security posture. |
-| **GCP** | 🚧 Planned | Organisation policies, IAM bindings, and service account audit. |
-| **Oracle Cloud** | 🚧 Planned | IAM compartment summary and API key hygiene check. |
+CloudPoodle is a modular, read-only cloud security & compliance auditor in Python.
+It pulls, analyzes, and reports metadata from identity platforms starting with **Microsoft Entra (Azure AD)**, with **AWS**, **GCP**, and **Oracle Cloud** on the roadmap.
 
 ---
 
-## 📦 Architecture
+## ✨ Features (current)
 
-CloudPoodle is modular by design:
+* **Microsoft Entra (Azure AD) modules**
+
+  * `tenant_overview` — core tenant facts, domains, branding, licensing
+  * `app_credentials_expiry` — expiring app/SP secrets & certs (KPIs, buckets, “soonest” standouts)
+  * `ca_policy_audit` — Conditional Access review with rich drawers & “overly permissive” notes
+  * `pim_role_audit` — permanent vs. PIM active/eligible role assignments
+  * `cis_audit` — CIS dashboard (Level 1/2) from module outputs + rule packs - **Still a WIP**
+  * `priv_esc_pathing` — potential escalation paths (PIM, group owners, self-GA candidates, etc.)
+  * `sp_risk_audit` — service principal & app registration risk (delegated grants; `--deep` adds app role checks)
+* **HTML reports**: themed, module-scoped CSS/JS, searchable tables, “View more…” pagination, drawers
+* **Exports**: JSON/CSV sidecars to re-use data (and to feed CIS rules)
+* **Graph client**: retries, pagination, error messages that don’t gaslight you
+
+Planned (scoped & stubbed, not started yet):
+
+* **AWS** — IAM overview & key hygiene
+* **GCP** — org policies & IAM bindings
+* **Oracle** — compartments & IAM audit
+
+---
+
+## 🧭 Project layout
 
 ```
-
 CloudPoodle/
 ├─ core/
-│  ├─ utils.py              ← shared helpers (printing, tables, exports)
-│  ├─ reporting.py          ← HTML & CSV/JSON reporting engine
-│  ├─ exports.py            ← unified export logic
-│  └─ ...
-├─ graph_handler/
-│  ├─ client.py             ← Microsoft Graph client (Entra)
-│  └─ graph_helpers.py      ← reusable Graph query utilities
+│  ├─ utils.py              # printing, tables, retries, exports
+│  ├─ reporting.py          # HTML/CSV rendering
+│  └─ …
+├─ handlers/graph/
+│  ├─ client.py             # Microsoft Graph client (app-only)
+│  └─ graph_helpers.py      # safe select helpers, etc.
 ├─ modules/
 │  └─ entra/
-│     ├─ tenant_overview.py ← Tenant metadata + domain enumeration
-│     └─ app_credentials_expiry.py ← Detect expiring app credentials
-└─ CloudPoodle.py           ← main CLI entry point
-
+│     ├─ tenant_overview.py
+│     ├─ app_credentials_expiry.py
+│     ├─ ca_policy_audit.py
+│     ├─ pim_role_audit.py
+│     ├─ priv_esc_pathing.py
+│     └─ cis_audit.py
+├─ rules/
+│  └─ cis/
+│     └─ entra/
+│        ├─ level1.json
+│        └─ level2.json
+└─ CloudPoodle.py           # CLI entry point
 ```
-
-Each module runs independently and can export results as **HTML**, **CSV**, or **JSON**,  
-or be chained into a **multi-module HTML report**.
-
----
-
-## ⚙️ Core Features
-
-- **Interactive authentication** if credentials are missing  
-  (`Client ID`, `Tenant ID`, and `Secret` are requested securely)
-- **Microsoft Graph integration** with retry and graceful error handling
-- **Colour-coded HTML reports** with provider-specific theming  
-  *(Entra blue, AWS orange, GCP blue, Oracle red)*
-- **JSON + CSV sidecar exports** for data reuse
-- **Extensible module system** simply drop a new script under `modules/` and register via `add_args()`
-
----
-
-## 📊 Example Output
-
-### CLI Summary
-```
-
-CloudPoodle v1.0 - "Because every cloud deserves a good sniff."
-
-[•] Following the Graph scent trail into Azure AD…
-[✓] Tenant Overview module complete.
-
-````
-
-### HTML Report
-
-Each report is auto-themed per provider and includes:
-- Header badge with provider logo (Base64 embedded)
-- Tabular summaries with auto-wrapping columns
-- Coloured risk “pills” for days-remaining thresholds  
-  (🟢 OK > 30 days, 🟠 Warning < 30, 🔴 Critical < 10)
-
-![Demo Entra Report](repo_images/EntraDemoReport.png)
-
-![Demo AWS Report](repo_images/AWSDemoReport.png)
 
 ---
 
 ## 🔧 Usage
 
+### General
+
 ```bash
-# Example: Run the Entra tenant overview
-python CloudPoodle.py tenant_overview --export entra_domains.csv --html entra_report.html
-````
+# Entra provider + pick a scan module (based on module name in structure)
+python3 CloudPoodle.py entra --scan tenant_overview
 
-### Optional arguments
+# Entra provider + all modules (Run 3 modules at once) - Warning for Graph API Limits
+python3 CloudPoodle.py entra --run_all --parallel 3
 
-| Flag         | Description                              |
-| ------------ | ---------------------------------------- |
-| `--export`   | Export data to `.csv` and `.json`        |
-| `--html`     | Generate a themed HTML report            |
-| `--provider` | Override provider (entra/aws/gcp/oracle) |
+# Add HTML CSV or JSON sidecar
+python3 CloudPoodle.py entra --scan app_credentials_expiry --export {html/csv/json} or multiple {--export html, csv, json}
 
-### Environment Variables
+# Verbose logging
+python3 CloudPoodle.py entra --scan pim_policy --debug
+```
 
-| Variable              | Purpose                          |
-| --------------------- | -------------------------------- |
-| `CLOUDPOODLE_CLIENT_ID`     | Entra app registration Client ID |
-| `CLOUDPOODLE_TENANT_ID`     | Entra Tenant ID                  |
-| `CLOUDPOODLE_CLIENT_SECRET` | Entra Client Secret              |
+### CIS Dashboard - Work in Progress Still.
 
-If any variables are not provided, CloudPoodle drops into **interactive mode** and temporarily stores missing credentials in memory.
+```bash
+# Evaluate Level 1 or Level 2 (uses rules/cis/entra/level{1,2}.json)
+python3 CloudPoodle.py entra --scan cis_audit --export {html/csv/json}
+python3 CloudPoodle.py entra --scan cis_audit --cis 1 --export {html/csv/json}
+
+```
+
+### SP / App Registration Risk (fast vs deep)
+
+```bash
+# FAST: delegated grants via oauth2PermissionGrants + app consent
+python3 CloudPoodle.py entra --scan sp_risk_audit
+
+# DEEP: also pull appRoleAssignments & extra lookups
+python3 CloudPoodle.py entra --scan sp_risk_audit --deep
+```
+
+### Privilege Escalation Pathing
+
+```bash
+python3 CloudPoodle.py entra --scan priv_esc_pathing --export {html/csv/json}
+```
 
 ---
 
-## 🧩 Planned Modules
+## 🧩 CLI flags (Entra)
 
-| Provider   | Module                | Description                                                  |
-| ---------- | --------------------- | ------------------------------------------------------------ |
-| **Entra**  | `app_roles_audit`     | Enumerate application role assignments and consented scopes. |
-| **AWS**    | `iam_overview`        | Enumerate IAM users, policies, and access key age.           |
-| **GCP**    | `sa_audit`            | Detect over-privileged service accounts.                     |
-| **Oracle** | `compartment_summary` | Display tenancy layout and security posture.                 |
+| Flag                       | What it does                                                    |
+| -------------------------- | --------------------------------------------------------------- |
+| `--scan <module>`          | Which module to run (see list above)                            |
+| `--html <file>`            | Write standalone HTML report                                    |
+| `--export <path>`          | Export CSV + JSON (module-specific)                             |
+| `--debug`                  | Extra logging                                                   |
+| `--cis {1\|2}`             | CIS level for `cis_audit`                                       |
+| `--deep`                   | Extra depth for modules that support it (e.g., `sp_risk_audit`) |
+
+---
+
+## 🔐 Auth & permissions (Entra)
+
+App-only (client credentials). Set environment variables or you’ll be prompted:
+
+| Env var                     | Purpose         |
+| --------------------------- | --------------- |
+| `CLOUDPOODLE_TENANT_ID`     | Entra tenant    |
+| `CLOUDPOODLE_CLIENT_ID`     | App (client) ID |
+| `CLOUDPOODLE_CLIENT_SECRET` | Client secret   |
+
+Recommended **application** permissions (read-only) for best coverage:
+
+* `Directory.Read.All`
+* `User.Read.All`
+* `Group.Read.All`
+* `Application.Read.All`
+* `RoleManagement.Read.Directory`
+* `Policy.Read.All` *(for CA policy details & security defaults)*
+
+> Missing permissions are handled gracefully—modules degrade or skip specific calls with warnings.
 
 ---
 
 ## 📁 Reports
 
-All reports are saved to:
+By default, you choose output paths via `--export`.
+Your environment or wrapper will place them under e.g. `~/.cloudpoodle/reports/<timestamp>/<module>/`.
 
-```
-~/.cloudpoodle/reports/<timestamp>/<module_name>/
-```
+Each HTML has:
 
-Multi-module reports combine results into tabbed HTML views for fast review.
+* compact table toolbars (search + optional “View more…”)
+* sticky headers, wrapped JSON
+* drawers for rich object details
+* top KPIs + small charts
 
 ---
 
-## 🧠 Developer Notes
+## 🧪 CIS rules format
 
-* Module entry points must define:
+Rules live here:
+
+```
+rules/cis/{provider}/level1.json
+rules/cis/{provider}/level2.json
+```
+
+They’re provider-scoped JSON files (id, title, severity, source.module/path, operator/value, remediation, tags…).
+You can edit these without touching code; `cis_audit` just re-evaluates them against module payloads.
+
+---
+
+## 🗺 Roadmap
+
+* AWS: IAM overview, key hygiene (read-only)
+* GCP: org policy & IAM bindings
+* Oracle: IAM & compartments
+* Multi-provider combined dashboards
+* Optional PDF export
+
+---
+
+## 🧠 Dev notes
+
+* A module only needs:
 
   ```python
-  def add_args(subparsers): ...
   def run(client, args): ...
   ```
-* Exports and reports are automatically handled by `core.exports`.
-* Colourful logging and witty messages are powered by `fncPrintMessage()` in `core.utils`.
+* Module payloads return a dict: keys become report sections.
+  Special keys: `"_kpis"`, `"_charts"`, `"_standouts"`, `"_inline_css"`, `"_inline_js"`, `"_container_class"`, `"_title"`, `"_subtitle"`.
+* Tables are built from `list[dict]` values. Dict/list values inside rows are auto-rendered as pretty JSON dropdowns.
 
 ---
 
-## 🚀 Future Roadmap
-
-* [ ] AWS IAM integration
-* [ ] GCP Cloud Resource Manager integration
-* [ ] Oracle Cloud Identity & Access module
-* [ ] PDF report generation
-* [ ] Scheduling / automated mode
-* [ ] Plugin discovery via `entry_points`
-
----
+questions / bugs? open an issue with the module name + the `[∆]`/`[✗]` log lines you see—those messages are designed to make triage easy.
